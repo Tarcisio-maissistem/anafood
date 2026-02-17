@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Totem de Autoatendimento</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --primary: #e85d04;
+    --primary-dark: #c44c00;
+    --secondary: #1a1a2e;
+    --bg: #0f0f1a;
+    --surface: #1e1e30;
+    --surface2: #2a2a40;
+    --text: #f0f0f0;
+    --text-muted: #9090a0;
+    --success: #22c55e;
+    --danger: #ef4444;
+    --pix: #32bcad;
+    --radius: 16px;
+  }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: 'Segoe UI', Arial, sans-serif; }
+  button { cursor: pointer; border: none; outline: none; touch-action: manipulation; user-select: none; -webkit-tap-highlight-color: transparent; }
+  input { outline: none; }
+
+  /* ── Telas ── */
+  .screen { display: none; flex-direction: column; width: 100vw; height: 100vh; }
+  .screen.active { display: flex; }
+
+  /* ── TELA: Boas-vindas ── */
+  #screen-boas-vindas {
+    justify-content: center; align-items: center; gap: 48px;
+    background: radial-gradient(ellipse at center, #1e1e30 0%, #0f0f1a 100%);
+  }
+  .logo-area { text-align: center; }
+  .logo-area h1 { font-size: 52px; font-weight: 800; color: var(--primary); letter-spacing: -1px; }
+  .logo-area p { font-size: 22px; color: var(--text-muted); margin-top: 8px; }
+  .welcome-buttons { display: flex; gap: 32px; }
+  .btn-welcome {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    width: 260px; height: 200px; border-radius: 24px; gap: 16px;
+    font-size: 22px; font-weight: 700; transition: transform .1s, opacity .1s;
+    background: var(--surface); border: 2px solid var(--surface2);
+  }
+  .btn-welcome:active { transform: scale(.96); opacity: .85; }
+  .btn-welcome .icon { font-size: 64px; }
+  .btn-welcome.comer { border-color: var(--primary); color: var(--primary); }
+  .btn-welcome.viagem { border-color: #6366f1; color: #6366f1; }
+  .touch-hint { font-size: 16px; color: var(--text-muted); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:.4} 50%{opacity:1} }
+
+  /* ── TELA: Cardápio ── */
+  #screen-cardapio { background: var(--bg); }
+  .top-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 24px; background: var(--surface);
+    border-bottom: 1px solid var(--surface2); flex-shrink: 0;
+  }
+  .top-bar h2 { font-size: 26px; font-weight: 700; }
+  .top-bar .mode-badge {
+    background: var(--primary); color: #fff;
+    padding: 6px 18px; border-radius: 999px; font-size: 14px; font-weight: 600;
+  }
+  .categories { display: flex; gap: 8px; padding: 14px 24px; overflow-x: auto; flex-shrink: 0; }
+  .categories::-webkit-scrollbar { display: none; }
+  .cat-btn {
+    padding: 10px 22px; border-radius: 999px; font-size: 15px; font-weight: 600;
+    white-space: nowrap; background: var(--surface2); color: var(--text-muted);
+    transition: background .15s, color .15s;
+  }
+  .cat-btn.active { background: var(--primary); color: #fff; }
+  .items-grid {
+    flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 16px; padding: 0 24px 120px; overflow-y: auto; align-content: start;
+  }
+  .items-grid::-webkit-scrollbar { width: 4px; }
+  .items-grid::-webkit-scrollbar-thumb { background: var(--surface2); border-radius: 4px; }
+  .item-card {
+    background: var(--surface); border-radius: var(--radius);
+    padding: 20px; display: flex; flex-direction: column; gap: 10px;
+    border: 2px solid transparent; transition: border-color .15s, transform .1s;
+    cursor: pointer;
+  }
+  .item-card:active { transform: scale(.97); border-color: var(--primary); }
+  .item-card .item-name { font-size: 18px; font-weight: 700; }
+  .item-card .item-desc { font-size: 13px; color: var(--text-muted); flex: 1; }
+  .item-card .item-price { font-size: 22px; font-weight: 800; color: var(--primary); }
+  .item-card .item-add {
+    background: var(--primary); color: #fff; border-radius: 999px;
+    padding: 10px; font-size: 15px; font-weight: 700; text-align: center;
+  }
+  .cart-bar {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: var(--primary); padding: 18px 32px;
+    display: flex; align-items: center; justify-content: space-between;
+    border-radius: 24px 24px 0 0; transition: transform .25s;
+    transform: translateY(100%);
+  }
+  .cart-bar.visible { transform: translateY(0); }
+  .cart-bar .cart-info { font-size: 20px; font-weight: 700; }
+  .cart-bar .cart-total { font-size: 22px; font-weight: 800; }
+  .cart-bar .btn-ver-carrinho {
+    background: #fff; color: var(--primary);
+    padding: 14px 28px; border-radius: 999px; font-size: 17px; font-weight: 800;
+  }
+
+  /* ── TELA: Carrinho ── */
+  #screen-carrinho { background: var(--bg); }
+  .cart-header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 20px 24px; background: var(--surface);
+    border-bottom: 1px solid var(--surface2); flex-shrink: 0;
+  }
+  .cart-header h2 { font-size: 26px; font-weight: 700; flex: 1; }
+  .btn-voltar {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--surface2); color: var(--text);
+    padding: 12px 20px; border-radius: 12px; font-size: 16px; font-weight: 600;
+  }
+  .cart-items { flex: 1; overflow-y: auto; padding: 16px 24px; display: flex; flex-direction: column; gap: 12px; }
+  .cart-item {
+    background: var(--surface); border-radius: var(--radius); padding: 16px 20px;
+    display: flex; align-items: center; gap: 16px;
+  }
+  .cart-item .ci-name { flex: 1; font-size: 18px; font-weight: 600; }
+  .cart-item .ci-price { font-size: 18px; font-weight: 700; color: var(--primary); min-width: 90px; text-align: right; }
+  .qty-ctrl { display: flex; align-items: center; gap: 8px; }
+  .qty-btn {
+    width: 44px; height: 44px; border-radius: 50%;
+    font-size: 22px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+  }
+  .qty-btn.minus { background: var(--surface2); color: var(--danger); }
+  .qty-btn.plus { background: var(--primary); color: #fff; }
+  .qty-val { font-size: 22px; font-weight: 700; min-width: 32px; text-align: center; }
+  .cart-footer {
+    padding: 20px 24px; background: var(--surface);
+    border-top: 1px solid var(--surface2); flex-shrink: 0;
+  }
+  .cart-footer .total-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .cart-footer .total-label { font-size: 20px; color: var(--text-muted); }
+  .cart-footer .total-value { font-size: 32px; font-weight: 800; color: var(--primary); }
+  .btn-pagar {
+    width: 100%; background: var(--primary); color: #fff;
+    padding: 20px; border-radius: var(--radius); font-size: 22px; font-weight: 800;
+  }
+  .empty-cart { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: var(--text-muted); }
+  .empty-cart .icon { font-size: 72px; }
+  .empty-cart p { font-size: 20px; }
+
+  /* ── TELA: Identificação ── */
+  #screen-identificacao { background: var(--bg); align-items: center; justify-content: center; gap: 32px; }
+  .id-card {
+    background: var(--surface); border-radius: 24px; padding: 40px;
+    width: min(560px, 90vw); display: flex; flex-direction: column; gap: 24px;
+  }
+  .id-card h2 { font-size: 28px; font-weight: 800; text-align: center; }
+  .id-card p { font-size: 16px; color: var(--text-muted); text-align: center; }
+  .numpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .numpad-display {
+    background: var(--surface2); border-radius: 12px; padding: 18px 24px;
+    font-size: 48px; font-weight: 800; text-align: center; letter-spacing: 12px;
+    min-height: 90px; display: flex; align-items: center; justify-content: center;
+    color: var(--primary);
+  }
+  .numpad-btn {
+    background: var(--surface2); color: var(--text);
+    border-radius: 12px; padding: 18px; font-size: 26px; font-weight: 700;
+    text-align: center; transition: background .1s;
+  }
+  .numpad-btn:active { background: var(--primary); color: #fff; }
+  .numpad-btn.action { background: var(--primary); color: #fff; }
+  .numpad-btn.del { background: var(--surface2); color: var(--danger); }
+  .btn-confirmar-id {
+    background: var(--primary); color: #fff;
+    padding: 20px; border-radius: var(--radius); font-size: 22px; font-weight: 800; width: 100%;
+  }
+  .btn-confirmar-id:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* ── TELA: Pagamento ── */
+  #screen-pagamento { background: var(--bg); }
+  .pay-header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 20px 24px; background: var(--surface);
+    border-bottom: 1px solid var(--surface2); flex-shrink: 0;
+  }
+  .pay-header h2 { font-size: 26px; font-weight: 700; flex: 1; }
+  .pay-tabs { display: flex; gap: 0; padding: 20px 24px 0; flex-shrink: 0; }
+  .pay-tab {
+    flex: 1; padding: 16px; font-size: 18px; font-weight: 700; text-align: center;
+    border-radius: 12px 12px 0 0; background: var(--surface2); color: var(--text-muted);
+  }
+  .pay-tab.active { background: var(--surface); color: var(--text); }
+  .pay-content { flex: 1; overflow-y: auto; padding: 24px; }
+  .pix-box { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+  .qr-container {
+    background: #fff; border-radius: 16px; padding: 16px;
+    width: 240px; height: 240px; display: flex; align-items: center; justify-content: center;
+  }
+  .qr-container img { width: 100%; height: 100%; object-fit: contain; }
+  .qr-placeholder { font-size: 13px; color: #333; text-align: center; padding: 8px; word-break: break-all; }
+  .pix-key-box {
+    background: var(--surface2); border-radius: 12px; padding: 14px 20px;
+    font-size: 13px; word-break: break-all; text-align: center; width: 100%;
+  }
+  .btn-copy {
+    background: var(--pix); color: #fff; padding: 14px 28px;
+    border-radius: 999px; font-size: 16px; font-weight: 700;
+  }
+  .pix-status { font-size: 18px; font-weight: 600; color: var(--text-muted); display: flex; align-items: center; gap: 10px; }
+  .pix-status .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--pix); animation: blink 1s infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.2} }
+  .pix-timer { font-size: 26px; font-weight: 800; color: var(--pix); }
+  .card-box { display: flex; flex-direction: column; align-items: center; gap: 24px; padding: 20px 0; }
+  .card-box .icon { font-size: 96px; }
+  .card-box p { font-size: 22px; font-weight: 600; text-align: center; max-width: 380px; color: var(--text-muted); }
+  .pay-total { font-size: 18px; color: var(--text-muted); }
+  .pay-total strong { color: var(--primary); font-size: 28px; }
+  .btn-confirmar-pagamento {
+    width: 100%; background: var(--success); color: #fff;
+    padding: 20px; border-radius: var(--radius); font-size: 22px; font-weight: 800;
+    margin-top: auto; flex-shrink: 0;
+  }
+  .pay-footer { padding: 20px 24px; flex-shrink: 0; }
+
+  /* ── TELA: Confirmação ── */
+  #screen-confirmacao {
+    background: var(--bg); align-items: center; justify-content: center;
+    flex-direction: column; gap: 32px; text-align: center;
+  }
+  .check-circle {
+    width: 160px; height: 160px; border-radius: 50%;
+    background: var(--success); display: flex; align-items: center; justify-content: center;
+    font-size: 80px; animation: pop .4s ease-out;
+  }
+  @keyframes pop { 0%{transform:scale(0)} 80%{transform:scale(1.1)} 100%{transform:scale(1)} }
+  .conf-title { font-size: 42px; font-weight: 800; }
+  .conf-sub { font-size: 22px; color: var(--text-muted); }
+  .conf-order { font-size: 32px; font-weight: 800; color: var(--primary); }
+  .conf-timer { font-size: 16px; color: var(--text-muted); }
+
+  /* ── Loading overlay ── */
+  #loading { position: fixed; inset: 0; background: rgba(15,15,26,.85); display: none; align-items: center; justify-content: center; z-index: 999; flex-direction: column; gap: 20px; }
+  #loading.show { display: flex; }
+  .spinner { width: 60px; height: 60px; border: 5px solid var(--surface2); border-top-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading p { font-size: 20px; color: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<!-- Loading -->
+<div id="loading"><div class="spinner"></div><p id="loading-text">Carregando...</p></div>
+
+<!-- ═══ TELA 1: Boas-vindas ═══ -->
+<div id="screen-boas-vindas" class="screen active">
+  <div class="logo-area">
+    <h1>🍽️ Sabor &amp; Arte</h1>
+    <p>Autoatendimento — Toque para começar</p>
+  </div>
+  <div class="welcome-buttons">
+    <button class="btn-welcome comer" onclick="escolherModo('TABLE')">
+      <span class="icon">🪑</span>
+      <span>Comer Aqui</span>
+    </button>
+    <button class="btn-welcome viagem" onclick="escolherModo('TAKEOUT')">
+      <span class="icon">🛍️</span>
+      <span>Para Viagem</span>
+    </button>
+  </div>
+  <p class="touch-hint">Toque em uma opção para começar</p>
+</div>
+
+<!-- ═══ TELA 2: Cardápio ═══ -->
+<div id="screen-cardapio" class="screen">
+  <div class="top-bar">
+    <h2>Cardápio</h2>
+    <span class="mode-badge" id="mode-badge">—</span>
+  </div>
+  <div class="categories" id="categories"></div>
+  <div class="items-grid" id="items-grid"></div>
+  <div class="cart-bar" id="cart-bar">
+    <div class="cart-info">🛒 <span id="cart-count">0</span> iten(s)</div>
+    <div class="cart-total" id="cart-bar-total">R$ 0,00</div>
+    <button class="btn-ver-carrinho" onclick="irParaCarrinho()">Ver Carrinho ›</button>
+  </div>
+</div>
+
+<!-- ═══ TELA 3: Carrinho ═══ -->
+<div id="screen-carrinho" class="screen">
+  <div class="cart-header">
+    <button class="btn-voltar" onclick="irParaCardapio()">‹ Voltar</button>
+    <h2>Seu Pedido</h2>
+  </div>
+  <div class="cart-items" id="cart-items-list"></div>
+  <div class="cart-footer">
+    <div class="total-row">
+      <span class="total-label">Total</span>
+      <span class="total-value" id="cart-total-display">R$ 0,00</span>
+    </div>
+    <button class="btn-pagar" id="btn-pagar" onclick="irParaIdentificacao()">Continuar ›</button>
+  </div>
+</div>
+
+<!-- ═══ TELA 4: Identificação ═══ -->
+<div id="screen-identificacao" class="screen">
+  <div class="id-card">
+    <h2 id="id-title">Qual é o número da sua mesa?</h2>
+    <p id="id-subtitle">Digite o número no teclado abaixo</p>
+    <div class="numpad-display" id="numpad-display">—</div>
+    <div class="numpad" id="numpad"></div>
+    <button class="btn-confirmar-id" id="btn-confirmar-id" disabled onclick="irParaPagamento()">Confirmar →</button>
+  </div>
+</div>
+
+<!-- ═══ TELA 5: Pagamento ═══ -->
+<div id="screen-pagamento" class="screen">
+  <div class="pay-header">
+    <button class="btn-voltar" onclick="irParaCarrinho()">‹ Voltar</button>
+    <h2>Pagamento</h2>
+  </div>
+  <div class="pay-tabs">
+    <button class="pay-tab active" id="tab-pix" onclick="selecionarPagamento('PIX')">💚 PIX</button>
+    <button class="pay-tab" id="tab-card" onclick="selecionarPagamento('CARTAO')">💳 Cartão</button>
+  </div>
+  <div class="pay-content">
+    <!-- PIX -->
+    <div id="pix-section">
+      <div class="pix-box">
+        <div class="pay-total">Total: <strong id="pay-total-pix">R$ 0,00</strong></div>
+        <div class="qr-container" id="qr-container">
+          <p class="qr-placeholder">Gerando QR Code...</p>
+        </div>
+        <div class="pix-key-box" id="pix-key-display">Aguardando...</div>
+        <button class="btn-copy" onclick="copiarPix()">📋 Copiar Chave PIX</button>
+        <div class="pix-status"><div class="dot"></div><span>Aguardando pagamento...</span></div>
+        <div class="pix-timer" id="pix-timer">10:00</div>
+      </div>
+    </div>
+    <!-- Cartão -->
+    <div id="card-section" style="display:none">
+      <div class="card-box">
+        <div class="pay-total">Total: <strong id="pay-total-card">R$ 0,00</strong></div>
+        <div class="icon">💳</div>
+        <p>Aproxime, insira ou passe seu cartão no terminal ao lado</p>
+        <p style="font-size:14px;margin-top:-8px">Crédito, Débito ou Contactless</p>
+      </div>
+    </div>
+  </div>
+  <div class="pay-footer">
+    <button class="btn-confirmar-pagamento" id="btn-confirmar-pag" onclick="confirmarPagamentoCartao()" style="display:none">
+      ✅ Confirmar Pagamento
+    </button>
+  </div>
+</div>
+
+<!-- ═══ TELA 6: Confirmação ═══ -->
+<div id="screen-confirmacao" class="screen">
+  <div class="check-circle">✅</div>
+  <h1 class="conf-title">Pedido Confirmado!</h1>
+  <p class="conf-sub">Seu pedido foi recebido com sucesso 🎉</p>
+  <p class="conf-order" id="conf-order-number">Número: —</p>
+  <p class="conf-timer" id="conf-countdown">Retornando em 10s...</p>
+</div>
+
+<script>
+// ═══ Estado Global ═══
+const ENV = 'homologation'; // trocar para 'production' em produção
+const state = {
+  mode: null,
+  catalog: [],
+  categories: [],
+  activeCategory: null,
+  cart: [],
+  tableNumber: null,
+  paymentMethod: 'PIX',
+  currentOrderId: null,
+  pixPaymentId: null,
+  pixQrCode: null,
+  pixPollingInterval: null,
+  pixTimerInterval: null,
+  confirmCountdown: null,
+};
+
+// ═══ Helpers ═══
+const R = (cents) => `R$ ${(cents / 100).toFixed(2).replace('.', ',')}`;
+const show = (id) => { document.querySelectorAll('.screen').forEach(s => s.classList.remove('active')); document.getElementById('screen-' + id).classList.add('active'); };
+const loading = (on, txt = 'Carregando...') => { document.getElementById('loading').classList[on ? 'add' : 'remove']('show'); document.getElementById('loading-text').textContent = txt; };
+
+// ═══ TELA 1: Boas-vindas ═══
+async function escolherModo(mode) {
+  state.mode = mode;
+  state.cart = [];
+  state.tableNumber = null;
+  document.getElementById('mode-badge').textContent = mode === 'TABLE' ? '🪑 Comer Aqui' : '🛍️ Para Viagem';
+  loading(true, 'Carregando cardápio...');
+  await carregarCatalogo();
+  loading(false);
+  show('cardapio');
+  renderCategories();
+  renderItems();
+  atualizarCartBar();
+}
+
+// ═══ TELA 2: Cardápio ═══
+async function carregarCatalogo() {
+  if (state.catalog.length > 0) return;
+  try {
+    const res = await fetch(`/api/totem/catalog?environment=${ENV}`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error);
+    state.catalog = json.items;
+    state.categories = ['Todos', ...new Set(json.items.map(i => i.category))];
+    state.activeCategory = 'Todos';
+  } catch (e) {
+    alert('Erro ao carregar cardápio: ' + e.message);
+  }
+}
+
+function renderCategories() {
+  const el = document.getElementById('categories');
+  el.innerHTML = state.categories.map(cat =>
+    `<button class="cat-btn ${cat === state.activeCategory ? 'active' : ''}" onclick="filtrarCategoria('${cat}')">${cat}</button>`
+  ).join('');
+}
+
+function filtrarCategoria(cat) {
+  state.activeCategory = cat;
+  renderCategories();
+  renderItems();
+}
+
+function renderItems() {
+  const items = state.activeCategory === 'Todos'
+    ? state.catalog
+    : state.catalog.filter(i => i.category === state.activeCategory);
+
+  document.getElementById('items-grid').innerHTML = items.map(item => `
+    <div class="item-card" onclick="adicionarItem('${item.integration_code}')">
+      <div class="item-name">${item.name}</div>
+      ${item.description ? `<div class="item-desc">${item.description}</div>` : ''}
+      <div class="item-price">${R(item.unit_price)}</div>
+      <div class="item-add">+ Adicionar</div>
+    </div>
+  `).join('');
+}
+
+function adicionarItem(code) {
+  const item = state.catalog.find(i => i.integration_code === code);
+  if (!item) return;
+  const existing = state.cart.find(i => i.integration_code === code);
+  if (existing) {
+    existing.quantity++;
+  } else {
+    state.cart.push({ integration_code: item.integration_code, name: item.name, unit_price: item.unit_price, quantity: 1 });
+  }
+  atualizarCartBar();
+  // Feedback visual breve
+  event.currentTarget.style.borderColor = 'var(--success)';
+  setTimeout(() => { if(event.currentTarget) event.currentTarget.style.borderColor = 'transparent'; }, 300);
+}
+
+function atualizarCartBar() {
+  const total = state.cart.reduce((s, i) => s + i.unit_price * i.quantity, 0);
+  const count = state.cart.reduce((s, i) => s + i.quantity, 0);
+  document.getElementById('cart-count').textContent = count;
+  document.getElementById('cart-bar-total').textContent = R(total);
+  document.getElementById('cart-bar').classList[count > 0 ? 'add' : 'remove']('visible');
+}
+
+function irParaCarrinho() {
+  renderCartItems();
+  show('carrinho');
+}
+
+function irParaCardapio() {
+  show('cardapio');
+}
+
+// ═══ TELA 3: Carrinho ═══
+function renderCartItems() {
+  const total = state.cart.reduce((s, i) => s + i.unit_price * i.quantity, 0);
+  document.getElementById('cart-total-display').textContent = R(total);
+
+  if (state.cart.length === 0) {
+    document.getElementById('cart-items-list').innerHTML = `
+      <div class="empty-cart"><div class="icon">🛒</div><p>Seu carrinho está vazio</p></div>`;
+    document.getElementById('btn-pagar').disabled = true;
+    return;
+  }
+
+  document.getElementById('btn-pagar').disabled = false;
+  document.getElementById('cart-items-list').innerHTML = state.cart.map((item, idx) => `
+    <div class="cart-item">
+      <div class="ci-name">${item.name}</div>
+      <div class="qty-ctrl">
+        <button class="qty-btn minus" onclick="alterarQtd(${idx}, -1)">−</button>
+        <div class="qty-val">${item.quantity}</div>
+        <button class="qty-btn plus" onclick="alterarQtd(${idx}, 1)">+</button>
+      </div>
+      <div class="ci-price">${R(item.unit_price * item.quantity)}</div>
+    </div>
+  `).join('');
+}
+
+function alterarQtd(idx, delta) {
+  state.cart[idx].quantity += delta;
+  if (state.cart[idx].quantity <= 0) state.cart.splice(idx, 1);
+  atualizarCartBar();
+  renderCartItems();
+}
+
+function irParaIdentificacao() {
+  if (state.cart.length === 0) return;
+  state.tableNumber = null;
+  document.getElementById('numpad-display').textContent = '—';
+  document.getElementById('btn-confirmar-id').disabled = true;
+  if (state.mode === 'TABLE') {
+    document.getElementById('id-title').textContent = 'Qual é o número da sua mesa?';
+    document.getElementById('id-subtitle').textContent = 'Veja o número na sua mesa e digite abaixo';
+  } else {
+    document.getElementById('id-title').textContent = 'Pedido para Viagem';
+    document.getElementById('id-subtitle').textContent = 'Confirme para prosseguir ao pagamento';
+    document.getElementById('numpad-display').textContent = '✓';
+    document.getElementById('btn-confirmar-id').disabled = false;
+  }
+  renderNumpad();
+  show('identificacao');
+}
+
+// ═══ TELA 4: Identificação ═══
+let numpadInput = '';
+
+function renderNumpad() {
+  numpadInput = '';
+  const el = document.getElementById('numpad');
+  const keys = ['1','2','3','4','5','6','7','8','9','DEL','0','OK'];
+  el.innerHTML = keys.map(k => {
+    if (k === 'DEL') return `<button class="numpad-btn del" onclick="numpadDel()">⌫</button>`;
+    if (k === 'OK') return `<button class="numpad-btn action" onclick="numpadOk()">OK</button>`;
+    return `<button class="numpad-btn" onclick="numpadPress('${k}')">${k}</button>`;
+  }).join('');
+
+  if (state.mode === 'TAKEOUT') el.style.display = 'none';
+  else el.style.display = 'grid';
+}
+
+function numpadPress(key) {
+  if (numpadInput.length >= 4) return;
+  numpadInput += key;
+  document.getElementById('numpad-display').textContent = numpadInput;
+  document.getElementById('btn-confirmar-id').disabled = numpadInput.length === 0;
+}
+
+function numpadDel() {
+  numpadInput = numpadInput.slice(0, -1);
+  document.getElementById('numpad-display').textContent = numpadInput || '—';
+  document.getElementById('btn-confirmar-id').disabled = numpadInput.length === 0;
+}
+
+function numpadOk() {
+  if (numpadInput.length > 0) irParaPagamento();
+}
+
+async function irParaPagamento() {
+  if (state.mode === 'TABLE') {
+    state.tableNumber = numpadInput || null;
+    if (!state.tableNumber) return;
+  }
+  selecionarPagamento('PIX');
+  const total = state.cart.reduce((s, i) => s + i.unit_price * i.quantity, 0);
+  document.getElementById('pay-total-pix').textContent = R(total);
+  document.getElementById('pay-total-card').textContent = R(total);
+  show('pagamento');
+  await gerarPix();
+}
+
+// ═══ TELA 5: Pagamento ═══
+function selecionarPagamento(method) {
+  state.paymentMethod = method;
+  document.getElementById('tab-pix').classList.toggle('active', method === 'PIX');
+  document.getElementById('tab-card').classList.toggle('active', method === 'CARTAO');
+  document.getElementById('pix-section').style.display = method === 'PIX' ? '' : 'none';
+  document.getElementById('card-section').style.display = method === 'CARTAO' ? '' : 'none';
+  document.getElementById('btn-confirmar-pag').style.display = method === 'CARTAO' ? '' : 'none';
+
+  if (method === 'PIX' && !state.pixPaymentId) gerarPix();
+}
+
+async function gerarPix() {
+  const total = state.cart.reduce((s, i) => s + i.unit_price * i.quantity, 0);
+  const orderId = `TOTEM-${Date.now()}`;
+  state.currentOrderId = orderId;
+
+  try {
+    const res = await fetch('/api/payment/pix', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount: total, order_id: orderId, description: 'Pedido Totem' })
+    });
+    const json = await res.json();
+
+    state.pixPaymentId = json.payment_id;
+    state.pixQrCode = json.qr_code;
+
+    // Exibe QR
+    const qrContainer = document.getElementById('qr-container');
+    if (json.qr_code_base64 && !json.stub) {
+      qrContainer.innerHTML = `<img src="${json.qr_code_base64}" alt="QR Code PIX">`;
+    } else {
+      // QR Code via API pública (sem backend de PIX real)
+      qrContainer.innerHTML = `<img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(json.qr_code || 'PIX-STUB')}" alt="QR Code PIX">`;
+    }
+    document.getElementById('pix-key-display').textContent = json.qr_code || 'Chave não disponível';
+
+    iniciarTimerPix(10 * 60); // 10 minutos
+    iniciarPollingPix(json.payment_id);
+
+  } catch (e) {
+    document.getElementById('qr-container').innerHTML = `<p class="qr-placeholder">Erro ao gerar PIX. Use o cartão.</p>`;
+  }
+}
+
+function iniciarTimerPix(seconds) {
+  clearInterval(state.pixTimerInterval);
+  let remaining = seconds;
+  const el = document.getElementById('pix-timer');
+  state.pixTimerInterval = setInterval(() => {
+    remaining--;
+    if (remaining <= 0) {
+      clearInterval(state.pixTimerInterval);
+      el.textContent = 'Expirado';
+      return;
+    }
+    const m = Math.floor(remaining / 60).toString().padStart(2, '0');
+    const s = (remaining % 60).toString().padStart(2, '0');
+    el.textContent = `${m}:${s}`;
+  }, 1000);
+}
+
+function iniciarPollingPix(paymentId) {
+  clearInterval(state.pixPollingInterval);
+  let attempts = 0;
+  state.pixPollingInterval = setInterval(async () => {
+    attempts++;
+    if (attempts > 200) { clearInterval(state.pixPollingInterval); return; }
+    try {
+      const res = await fetch(`/api/payment/pix/${paymentId}/status`);
+      const json = await res.json();
+      if (json.status === 'approved') {
+        clearInterval(state.pixPollingInterval);
+        clearInterval(state.pixTimerInterval);
+        await submeterPedido();
+      }
+    } catch (_) {}
+  }, 3000);
+}
+
+function copiarPix() {
+  if (state.pixQrCode) {
+    navigator.clipboard.writeText(state.pixQrCode).catch(() => {});
+    const btn = document.querySelector('.btn-copy');
+    btn.textContent = '✅ Copiado!';
+    setTimeout(() => btn.textContent = '📋 Copiar Chave PIX', 2000);
+  }
+}
+
+async function confirmarPagamentoCartao() {
+  await submeterPedido();
+}
+
+async function submeterPedido() {
+  loading(true, 'Registrando pedido...');
+  clearInterval(state.pixPollingInterval);
+  clearInterval(state.pixTimerInterval);
+
+  const payload = {
+    items: state.cart,
+    mode: state.mode,
+    table_number: state.tableNumber,
+    payment_method: state.paymentMethod,
+  };
+
+  try {
+    const res = await fetch(`/api/totem/order?environment=${ENV}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json();
+    loading(false);
+
+    if (!json.success) throw new Error(json.error);
+
+    document.getElementById('conf-order-number').textContent = `Número: ${json.display_id}`;
+    state.cart = [];
+    state.pixPaymentId = null;
+    state.pixQrCode = null;
+    show('confirmacao');
+    iniciarCountdownConfirmacao();
+
+  } catch (e) {
+    loading(false);
+    alert('Erro ao registrar pedido: ' + e.message);
+  }
+}
+
+// ═══ TELA 6: Confirmação ═══
+function iniciarCountdownConfirmacao() {
+  clearInterval(state.confirmCountdown);
+  let remaining = 12;
+  const el = document.getElementById('conf-countdown');
+  state.confirmCountdown = setInterval(() => {
+    remaining--;
+    el.textContent = `Retornando em ${remaining}s...`;
+    if (remaining <= 0) {
+      clearInterval(state.confirmCountdown);
+      resetarTotem();
+    }
+  }, 1000);
+}
+
+function resetarTotem() {
+  state.mode = null;
+  state.cart = [];
+  state.tableNumber = null;
+  state.paymentMethod = 'PIX';
+  state.currentOrderId = null;
+  state.pixPaymentId = null;
+  state.pixQrCode = null;
+  numpadInput = '';
+  atualizarCartBar();
+  show('boas-vindas');
+}
+</script>
+</body>
+</html>

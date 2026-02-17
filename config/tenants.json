@@ -1,0 +1,52 @@
+{
+  "defaultTenantId": "default",
+  "tenants": [
+    {
+      "id": "default",
+      "name": "Empresa Demo",
+      "active": true,
+      "environment": "homologation",
+      "business": {
+        "segment": "restaurant",
+        "restaurant": {
+          "requireAddress": true,
+          "orderProvider": "saipos"
+        }
+      },
+      "agent": {
+        "name": "Ana",
+        "personality": "atendente simpatica, objetiva e consultiva",
+        "customPrompt": "Sempre confirme os dados do pedido antes de finalizar e use linguagem clara."
+      },
+      "saipos": {
+        "homologation": {
+          "baseUrl": "${HOMOLOG_API_URL}",
+          "idPartner": "${HOMOLOG_ID_PARTNER}",
+          "secret": "${HOMOLOG_SECRET}",
+          "codStore": "${HOMOLOG_COD_STORE}"
+        },
+        "production": {
+          "baseUrl": "${PRODUCTION_API_URL}",
+          "idPartner": "${PRODUCTION_ID_PARTNER}",
+          "secret": "${PRODUCTION_SECRET}",
+          "codStore": "${PRODUCTION_COD_STORE}"
+        }
+      },
+      "evolution": {
+        "apiUrl": "${EVOLUTION_API_URL}",
+        "apiKey": "${EVOLUTION_API_KEY}",
+        "instance": "Teste03"
+      },
+      "integrations": {
+        "anafood": {
+          "endpoint": "${ANAFOOD_API_URL}",
+          "authMode": "company_key",
+          "companyKey": "${ANAFOOD_COMPANY_KEY}",
+          "apiToken": "${ANAFOOD_API_TOKEN}",
+          "companyId": "${ANAFOOD_COMPANY_ID}",
+          "companyHeader": "${ANAFOOD_COMPANY_HEADER}"
+        }
+      }
+    }
+  ]
+}

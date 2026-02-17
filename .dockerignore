@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+Dockerfile*
+docker-compose*
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+data/ana_state.json
+supabase_openapi.json
