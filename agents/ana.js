@@ -3,11 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { OpenAI } = require('openai');
-const { execFile } = require('child_process');
-const util = require('util');
-
-const execFileAsync = util.promisify(execFile);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 const BUFFER_WINDOW_MS = Number(process.env.MESSAGE_BUFFER_MS || 20000);
 const SESSION_TTL = Number(process.env.CONVERSATION_TTL_MS || 60 * 60 * 1000);
@@ -175,7 +171,7 @@ async function normalizeMessageBlock({ rawText, rawMessage }) {
   if (!hasAudio) return { normalizedText: baseText, sourceType: 'text', originalText: rawText, transcription: null };
 
   const audioBase64 = rawMessage?.audioMessage?.base64 || rawMessage?.audioBase64 || null;
-  if (!audioBase64 || !process.env.OPENAI_API_KEY) {
+  if (!audioBase64 || !openai) {
     return { normalizedText: baseText, sourceType: 'audio', originalText: rawText, transcription: null };
   }
   try {
@@ -197,6 +193,9 @@ async function classifierAgent({ runtime, conversation, groupedText }) {
   if (/pix|cartao|cartão|paguei|pagamento/.test(lower)) return { intent: INTENTS.PAGAMENTO, requires_extraction: true, handoff: false, confidence: 0.7 };
   if (/cancel/.test(lower)) return { intent: INTENTS.CANCELAMENTO, requires_extraction: false, handoff: false, confidence: 0.7 };
 
+  if (!openai) {
+    return { intent: INTENTS.CONSULTA, requires_extraction: false, handoff: false, confidence: 0.5 };
+  }
   try {
     const c = await openai.chat.completions.create({
       model: runtime.model,
@@ -566,6 +565,9 @@ async function generatorAgent({ runtime, conversation, classification, orchestra
     missing: orchestratorResult.missing || [],
     transaction: conversation.transaction,
   };
+  if (!openai) {
+    return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing);
+  }
   try {
     const c = await openai.chat.completions.create({
       model: runtime.model,
@@ -585,6 +587,7 @@ async function generatorAgent({ runtime, conversation, classification, orchestra
 
 async function maybeSummarize({ runtime, conversation }) {
   if ((conversation.messageCount || 0) % SUMMARY_EVERY_N_MESSAGES !== 0) return;
+  if (!openai) return;
   try {
     const c = await openai.chat.completions.create({
       model: runtime.model,
@@ -611,24 +614,19 @@ async function sendWhatsAppMessage(phone, text, runtime) {
   const numbers = Array.from(new Set([rawPhone, digitsPhone, digitsPhone ? `${digitsPhone}@s.whatsapp.net` : ''].filter(Boolean)));
 
   const postJson = async (number) => {
-    const { stdout, stderr } = await execFileAsync(
-      'curl.exe',
-      [
-        '-s', '-X', 'POST',
-        `${apiUrl}/message/sendText/${instance}`,
-        '-H', `apikey: ${apiKey}`,
-        '-H', 'Content-Type: application/json',
-        '-d', JSON.stringify({ number, text: safeText, delay: 600 }),
-        '-w', '\n%{http_code}',
-      ],
-      { windowsHide: true, timeout: 20000, maxBuffer: 1024 * 1024 }
-    );
-    const lines = String(stdout || '').trim().split(/\r?\n/);
-    const status = Number(lines.pop() || 0);
-    if (stderr || status >= 400 || !status) {
-      const err = new Error(`HTTP ${status || 500}`);
-      err.status = status || 500;
-      err.details = stderr || lines.join('\n');
+    const response = await fetch(`${apiUrl}/message/sendText/${instance}`, {
+      method: 'POST',
+      headers: {
+        apikey: apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ number, text: safeText, delay: 600 }),
+    });
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => '');
+      const err = new Error(`HTTP ${response.status}`);
+      err.status = response.status;
+      err.details = bodyText;
       throw err;
     }
   };
@@ -645,7 +643,7 @@ async function sendWhatsAppMessage(phone, text, runtime) {
       }
     }
   }
-  console.error(`[ANA] Nao foi possivel enviar WhatsApp para ${phone}:`, util.inspect(lastErr?.details || lastErr?.message));
+  console.error(`[ANA] Nao foi possivel enviar WhatsApp para ${phone}:`, lastErr?.details || lastErr?.message || 'unknown error');
   return false;
 }
 
