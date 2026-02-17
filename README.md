@@ -12,6 +12,17 @@ npm start
 
 Aplicacao em `http://localhost:3993`.
 
+## Frontend Lovable no mesmo repo
+
+O build publicado da Lovable foi importado para `public/lovable`.
+
+- Acesso local: `http://localhost:3993/lovable/`
+- Sincronizar novamente do deploy Lovable:
+
+```bash
+npm run sync:lovable
+```
+
 ## Deploy na VPS (EasyPanel)
 
 Veja `DEPLOY_EASYPANEL.md`.
