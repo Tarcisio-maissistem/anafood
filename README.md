@@ -10,7 +10,7 @@ cp .env.example .env
 npm start
 ```
 
-Aplicacao em `http://localhost:3000`.
+Aplicacao em `http://localhost:3993`.
 
 ## Deploy na VPS (EasyPanel)
 

@@ -8,7 +8,7 @@ const { handleWhatsAppMessage } = require('./agents/ana');
 const { resolveTenant, listTenants } = require('./lib/tenants');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3993;
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));

@@ -27,7 +27,7 @@ git remote add origin https://github.com/SEU_USUARIO/SEU_REPO.git
 2. Add Service -> App.
 3. Source: GitHub repo deste projeto.
 4. Build Type: Dockerfile.
-5. Port interno: `3000`.
+5. Port interno: `3993`.
 6. Start command: deixe padrao do Dockerfile (`npm start`).
 
 ## 3) Variaveis de ambiente
@@ -36,7 +36,7 @@ No EasyPanel -> Service -> Environment, copie os valores do `.env` (nao comitar 
 
 Minimo recomendado:
 
-- `PORT=3000`
+- `PORT=3993`
 - `OPENAI_API_KEY`
 - `HOMOLOG_*` e/ou `PRODUCTION_*`
 - `EVOLUTION_API_URL`
