@@ -34,10 +34,6 @@
     ui.status.className = `status ${cls || ''}`;
   }
 
-  function normalizePhone(value) {
-    return String(value || '').replace(/\D/g, '');
-  }
-
   function formatTime(iso) {
     if (!iso) return '';
     const dt = new Date(iso);
@@ -54,15 +50,17 @@
 
   async function loadDefaultInstance() {
     try {
-      const data = await fetchJson('/api/tenants');
-      const current = Array.isArray(data.tenants) ? data.tenants.find((t) => t.id === data.tenants?.[0]?.id) : null;
-      state.tenantId = current?.id || 'default';
-      state.instance = current?.evolution?.instance || '';
+      const data = await fetchJson('/api/ana/default-instance?tenant_id=default');
+      state.tenantId = data.tenantId || 'default';
+      state.instance = data.instance || '';
+      if (data.configuredInstance && data.configuredInstance !== data.instance) {
+        setStatus(`Instancia configurada (${data.configuredInstance}) indisponivel. Usando ${data.instance}.`, 'warn');
+      }
     } catch (_) {
       state.tenantId = 'default';
       state.instance = '';
     }
-    ui.instanceInfo.textContent = `Instância padrão: ${state.instance || '(não definida)'}`;
+    ui.instanceInfo.textContent = `Instancia padrao: ${state.instance || '(nao definida)'}`;
   }
 
   function renderList() {
@@ -94,6 +92,11 @@
   async function loadConversations() {
     const search = encodeURIComponent((ui.searchInput.value || '').trim());
     const data = await fetchJson(`/api/ana/conversations?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&limit=50&search=${search}`);
+    if (data.instance && data.instance !== state.instance) {
+      state.instance = data.instance;
+      ui.instanceInfo.textContent = `Instancia padrao: ${state.instance || '(nao definida)'}`;
+    }
+
     state.conversations = data.conversations || [];
     if (!state.selectedPhone && state.conversations.length) {
       state.selectedPhone = state.conversations[0].phone;
@@ -120,7 +123,7 @@
 
     ui.contactAvatar.textContent = state.selectedPhone.slice(-2) || '--';
     ui.contactName.textContent = state.selectedPhone;
-    ui.contactState.textContent = `Estado: ${sessionData?.state || 'INIT'} | Instância: ${state.instance || '-'}`;
+    ui.contactState.textContent = `Estado: ${sessionData?.state || 'INIT'} | Instancia: ${state.instance || '-'}`;
 
     const messages = msgData.messages || [];
     ui.messages.innerHTML = '';
@@ -197,12 +200,12 @@
         caption: (ui.textInput.value || '').trim(),
       }),
     });
-    setStatus('Arquivo/mídia enviado.', 'ok');
+    setStatus('Arquivo/midia enviado.', 'ok');
     await loadConversations();
   }
 
   async function toggleRecording() {
-    if (!navigator.mediaDevices?.getUserMedia) return setStatus('Gravação não suportada.', 'err');
+    if (!navigator.mediaDevices?.getUserMedia) return setStatus('Gravacao nao suportada.', 'err');
     if (state.recorder && state.recorder.state === 'recording') {
       state.recorder.stop();
       return;
@@ -220,14 +223,14 @@
         const file = new File([blob], `audio-${Date.now()}.webm`, { type: blob.type || 'audio/webm' });
         await sendFile(file);
       } catch (err) {
-        setStatus(`Falha no envio de áudio: ${err.message}`, 'err');
+        setStatus(`Falha no envio de audio: ${err.message}`, 'err');
       } finally {
         stream.getTracks().forEach((t) => t.stop());
       }
     };
     state.recorder.start();
     ui.recordBtn.textContent = 'Parar';
-    setStatus('Gravando áudio... clique novamente para parar.', 'warn');
+    setStatus('Gravando audio... clique novamente para parar.', 'warn');
   }
 
   ui.refreshBtn.onclick = function () { loadConversations().then(() => setStatus('Atualizado.', 'ok')).catch((e) => setStatus(e.message, 'err')); };
@@ -247,7 +250,7 @@
     try {
       await loadDefaultInstance();
       await loadConversations();
-      setStatus('Inbox pronta. Carregadas as últimas 50 conversas.', 'ok');
+      setStatus('Inbox pronta. Carregadas as ultimas 50 conversas.', 'ok');
       if (state.poller) clearInterval(state.poller);
       state.poller = setInterval(function () {
         loadConversations().catch((e) => setStatus(e.message, 'err'));

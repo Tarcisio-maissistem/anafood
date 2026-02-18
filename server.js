@@ -408,6 +408,61 @@ const fetchEvolutionMessages = async ({ apiUrl, apiKey, instance, remoteJid, lim
     return [];
 };
 
+const fetchEvolutionInstances = async ({ apiUrl, apiKey }) => {
+    if (!apiUrl || !apiKey) return [];
+    const endpoints = [
+        `${apiUrl}/instance/fetchInstances`,
+        `${apiUrl}/instance/findInstances`,
+        `${apiUrl}/instance/list`,
+        `${apiUrl}/instance/all`,
+    ];
+
+    for (const endpoint of endpoints) {
+        try {
+            const response = await fetch(endpoint, {
+                method: 'GET',
+                headers: { apikey: apiKey, Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+            });
+            if (!response.ok) continue;
+            const payload = await response.json().catch(() => ({}));
+            const rows = toArrayPayload(payload);
+            if (!rows.length) continue;
+
+            const instances = rows.map((row) => {
+                const name =
+                    row?.instance?.instanceName ||
+                    row?.instanceName ||
+                    row?.name ||
+                    row?.instance ||
+                    '';
+                const state =
+                    row?.instance?.state ||
+                    row?.state ||
+                    row?.status ||
+                    '';
+                return { name: String(name), state: String(state).toLowerCase() };
+            }).filter((r) => r.name);
+
+            if (instances.length) return instances;
+        } catch (_) {
+            // try next endpoint
+        }
+    }
+    return [];
+};
+
+const pickBestEvolutionInstance = (configuredInstance, availableInstances = []) => {
+    const names = availableInstances.map((i) => i.name);
+    const open = availableInstances.find((i) => i.state === 'open' || i.state === 'connected');
+    const connecting = availableInstances.find((i) => i.state === 'connecting');
+
+    if (configuredInstance && names.includes(configuredInstance)) return configuredInstance;
+    if (open?.name) return open.name;
+    if (connecting?.name) return connecting.name;
+    if (availableInstances[0]?.name) return availableInstances[0].name;
+    return configuredInstance || '';
+};
+
 const getTenantFromRequest = (req) => {
     const queryTenant = req.query?.tenant_id || req.query?.tenant;
     const headerTenant = req.get('x-tenant-id') || req.get('x-tenant');
@@ -687,6 +742,32 @@ app.post('/api/ana/simulate', async (req, res) => {
 });
 
 /**
+ * GET /api/ana/default-instance
+ * Resolve a melhor instancia Evolution disponivel para o tenant.
+ */
+app.get('/api/ana/default-instance', async (req, res) => {
+    try {
+        const tenant = resolveTenant({
+            tenantId: req.query?.tenant_id || req.query?.tenant || null,
+            instanceName: req.query?.instance || null,
+        });
+        const tenantId = tenant?.id || 'default';
+        const evo = getEvolutionConfig(tenant, req.query?.instance || null);
+        const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
+        const instance = pickBestEvolutionInstance(evo.instance, availableInstances);
+        return res.json({
+            success: true,
+            tenantId,
+            instance,
+            configuredInstance: evo.instance,
+            availableInstances,
+        });
+    } catch (error) {
+        handleError(res, error);
+    }
+});
+
+/**
  * GET /api/ana/conversations
  * Lista conversas conhecidas para inbox operacional.
  * Query: tenant_id (opcional), instance (opcional), search (opcional)
@@ -725,10 +806,12 @@ app.get('/api/ana/conversations', (req, res) => {
         });
 
     const buildResponse = async () => {
+        const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
+        const resolvedInstance = pickBestEvolutionInstance(evo.instance, availableInstances);
         const evolutionRows = await fetchEvolutionChats({
             apiUrl: evo.apiUrl,
             apiKey: evo.apiKey,
-            instance: evo.instance,
+            instance: resolvedInstance,
             limit,
         });
 
@@ -768,7 +851,9 @@ app.get('/api/ana/conversations', (req, res) => {
         return res.json({
             success: true,
             tenantId,
-            instance: evo.instance,
+            instance: resolvedInstance,
+            configuredInstance: evo.instance,
+            availableInstances,
             count: rows.length,
             conversations: rows,
         });
@@ -795,10 +880,12 @@ app.get('/api/ana/messages', (req, res) => {
     const remoteJid = `${phone}@s.whatsapp.net`;
 
     const run = async () => {
+        const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
+        const resolvedInstance = pickBestEvolutionInstance(evo.instance, availableInstances);
         const evolutionMessages = await fetchEvolutionMessages({
             apiUrl: evo.apiUrl,
             apiKey: evo.apiKey,
-            instance: evo.instance,
+            instance: resolvedInstance,
             remoteJid,
             limit,
         });
@@ -817,7 +904,7 @@ app.get('/api/ana/messages', (req, res) => {
         return res.json({
             success: true,
             tenantId,
-            instance: evo.instance,
+            instance: resolvedInstance,
             phone,
             remoteJid,
             count: messages.length,
@@ -879,6 +966,8 @@ app.post('/api/ana/send', async (req, res) => {
         });
         const tenantId = tenant?.id || 'default';
         const evo = getEvolutionConfig(tenant, req.body?.instance || null);
+        const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
+        const resolvedInstance = pickBestEvolutionInstance(evo.instance, availableInstances);
 
         const text = String(req.body?.text || '').trim();
         const mediaBase64 = String(req.body?.mediaBase64 || '').trim();
@@ -891,7 +980,7 @@ app.post('/api/ana/send', async (req, res) => {
             result = await sendEvolutionMedia({
                 apiUrl: evo.apiUrl,
                 apiKey: evo.apiKey,
-                instance: evo.instance,
+                instance: resolvedInstance,
                 phone,
                 base64: mediaBase64,
                 mimeType,
@@ -902,7 +991,7 @@ app.post('/api/ana/send', async (req, res) => {
             result = await sendEvolutionText({
                 apiUrl: evo.apiUrl,
                 apiKey: evo.apiKey,
-                instance: evo.instance,
+                instance: resolvedInstance,
                 phone,
                 text,
             });
@@ -927,7 +1016,7 @@ app.post('/api/ana/send', async (req, res) => {
             session.lastActivityAt = new Date().toISOString();
         }
 
-        return res.json({ success: true, tenantId, phone, instance: evo.instance });
+        return res.json({ success: true, tenantId, phone, instance: resolvedInstance, configuredInstance: evo.instance });
     } catch (error) {
         handleError(res, error);
     }
@@ -1559,6 +1648,7 @@ const apiOverview = () => ({
         webhookWhatsApp: 'POST /webhook/whatsapp',
         anaConversations:'GET  /api/ana/conversations',
         anaMessages:     'GET  /api/ana/messages',
+        anaDefaultInst:  'GET  /api/ana/default-instance',
         anaContactCtrl:  'GET/POST /api/ana/contact-control',
         anaSend:         'POST /api/ana/send',
         conversasUI:     'GET  /conversas',
