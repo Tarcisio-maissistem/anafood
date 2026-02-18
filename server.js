@@ -20,6 +20,10 @@ app.get('/qz-tray.js', (_req, res) => {
     if (!fs.existsSync(file)) return res.sendStatus(404);
     return res.sendFile(file);
 });
+app.get('/sounds/default-notification.mp3', (_req, res) => {
+    // Avoid noisy 404 in dashboards that expect an optional notification sound file.
+    return res.sendStatus(204);
+});
 
 // Optional analytics endpoints referenced by mirrored Lovable build.
 app.get('/~flock.js', (_req, res) => {
