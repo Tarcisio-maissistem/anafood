@@ -169,6 +169,7 @@ const apiRequest = async (environment, method, path, body = null, tenant = null)
 };
 
 const normalizePhone = (value) => String(value || '').replace(/\D/g, '');
+const safeTrim = (value) => String(value || '').trim();
 
 const getContactKey = (tenantId, phone) => `${tenantId}:${normalizePhone(phone)}`;
 
@@ -195,13 +196,19 @@ const getEvolutionConfig = (tenant, instanceName = null) => ({
     instance: instanceName || tenant?.evolution?.instance || process.env.EVOLUTION_INSTANCE || '',
 });
 
-const sendEvolutionText = async ({ apiUrl, apiKey, instance, phone, text }) => {
+const sendEvolutionText = async ({ apiUrl, apiKey, instance, phone, remoteJid, text }) => {
     const safeText = String(text || '').trim();
     if (!apiUrl || !apiKey || !instance || !safeText) return { ok: false, error: 'Parametros invalidos para envio' };
 
     const rawPhone = String(phone || '').trim();
     const digitsPhone = normalizePhone(rawPhone);
-    const numbers = Array.from(new Set([rawPhone, digitsPhone, digitsPhone ? `${digitsPhone}@s.whatsapp.net` : ''].filter(Boolean)));
+    const numbers = Array.from(new Set([
+        safeTrim(remoteJid),
+        rawPhone,
+        digitsPhone,
+        digitsPhone ? `${digitsPhone}@s.whatsapp.net` : '',
+        digitsPhone ? `${digitsPhone}@lid` : '',
+    ].filter(Boolean)));
     const endpoints = [
         `${apiUrl}/message/sendText/${instance}`,
         `${apiUrl}/message/sendText/${instance}?delay=600`,
@@ -238,12 +245,18 @@ const sendEvolutionText = async ({ apiUrl, apiKey, instance, phone, text }) => {
     return { ok: false, error: lastError || 'Falha desconhecida no envio de texto' };
 };
 
-const sendEvolutionMedia = async ({ apiUrl, apiKey, instance, phone, base64, mimeType, fileName, caption = '' }) => {
+const sendEvolutionMedia = async ({ apiUrl, apiKey, instance, phone, remoteJid, base64, mimeType, fileName, caption = '' }) => {
     if (!apiUrl || !apiKey || !instance || !base64) return { ok: false, error: 'Parametros invalidos para envio de midia' };
 
     const rawPhone = String(phone || '').trim();
     const digitsPhone = normalizePhone(rawPhone);
-    const numbers = Array.from(new Set([rawPhone, digitsPhone, digitsPhone ? `${digitsPhone}@s.whatsapp.net` : ''].filter(Boolean)));
+    const numbers = Array.from(new Set([
+        safeTrim(remoteJid),
+        rawPhone,
+        digitsPhone,
+        digitsPhone ? `${digitsPhone}@s.whatsapp.net` : '',
+        digitsPhone ? `${digitsPhone}@lid` : '',
+    ].filter(Boolean)));
     const endpoints = [
         `${apiUrl}/message/sendMedia/${instance}`,
         `${apiUrl}/message/sendFileFromBase64/${instance}`,
@@ -375,9 +388,29 @@ const fetchEvolutionChats = async ({ apiUrl, apiKey, instance, limit = 50 }) => 
                 const lastMessageText = extractTextFromAnyMessage(chat?.lastMessage || chat?.message || chat);
                 const ts = chat?.conversationTimestamp || chat?.timestamp || chat?.t || chat?.lastMessageTimestamp || null;
                 const at = ts ? new Date(Number(ts) > 9999999999 ? Number(ts) : Number(ts) * 1000).toISOString() : null;
+                const name =
+                    chat?.pushName ||
+                    chat?.name ||
+                    chat?.notify ||
+                    chat?.contactName ||
+                    chat?.contact?.name ||
+                    chat?.contact?.pushName ||
+                    chat?.verifiedName ||
+                    '';
+                const avatarUrl =
+                    chat?.profilePicUrl ||
+                    chat?.profilePictureUrl ||
+                    chat?.picture ||
+                    chat?.avatar ||
+                    chat?.imgUrl ||
+                    chat?.contact?.profilePicUrl ||
+                    chat?.contact?.profilePictureUrl ||
+                    '';
                 return {
                     phone,
                     remoteJid: remoteJid || (phone ? `${phone}@s.whatsapp.net` : ''),
+                    name: String(name || '').trim(),
+                    avatarUrl: String(avatarUrl || '').trim(),
                     lastMessage: { role: 'user', content: String(lastMessageText || '').slice(0, 280), at },
                     lastActivityAt: at,
                 };
@@ -466,9 +499,29 @@ const fetchEvolutionContacts = async ({ apiUrl, apiKey, instance, limit = 50 }) 
                     row?.key?.remoteJid ||
                     '';
                 const phone = String(remoteJid).split('@')[0].replace(/\D/g, '');
+                const name =
+                    row?.pushName ||
+                    row?.name ||
+                    row?.notify ||
+                    row?.contactName ||
+                    row?.verifiedName ||
+                    row?.contact?.name ||
+                    row?.contact?.pushName ||
+                    '';
+                const avatarUrl =
+                    row?.profilePicUrl ||
+                    row?.profilePictureUrl ||
+                    row?.picture ||
+                    row?.avatar ||
+                    row?.imgUrl ||
+                    row?.contact?.profilePicUrl ||
+                    row?.contact?.profilePictureUrl ||
+                    '';
                 return {
                     phone,
                     remoteJid: remoteJid || (phone ? `${phone}@s.whatsapp.net` : ''),
+                    name: String(name || '').trim(),
+                    avatarUrl: String(avatarUrl || '').trim(),
                     lastMessage: null,
                     lastActivityAt: null,
                 };
@@ -834,6 +887,8 @@ app.post('/api/ana/simulate', async (req, res) => {
             tenant,
             rawMessage: null,
             instanceName: req.body?.instance || req.body?.instanceName || null,
+            remoteJid: req.body?.remoteJid || null,
+            contactName: req.body?.contactName || '',
         });
 
         return res.json({
@@ -904,6 +959,9 @@ app.get('/api/ana/conversations', (req, res) => {
             const control = getContactControl(tenantId, phone);
             return {
                 phone,
+                name: safeTrim(session?.contactName || session?.name || ''),
+                avatarUrl: safeTrim(session?.avatarUrl || ''),
+                remoteJid: safeTrim(session?.remoteJid || ''),
                 state: session?.state || 'INIT',
                 lastActivityAt: session?.lastActivityAt || session?.createdAt || null,
                 messageCount: session?.messageCount || 0,
@@ -944,6 +1002,8 @@ app.get('/api/ana/conversations', (req, res) => {
             merged.set(row.phone, {
                 phone: row.phone,
                 remoteJid: row.remoteJid || `${row.phone}@s.whatsapp.net`,
+                name: safeTrim(row.name || ''),
+                avatarUrl: safeTrim(row.avatarUrl || ''),
                 state: 'INIT',
                 messageCount: 0,
                 lastActivityAt: row.lastActivityAt || null,
@@ -960,13 +1020,18 @@ app.get('/api/ana/conversations', (req, res) => {
                 ...current,
                 ...row,
                 remoteJid: current.remoteJid || `${row.phone}@s.whatsapp.net`,
+                name: row.name || current.name || '',
+                avatarUrl: row.avatarUrl || current.avatarUrl || '',
                 lastActivityAt: row.lastActivityAt || current.lastActivityAt || null,
                 lastMessage: row.lastMessage || current.lastMessage || null,
             });
         }
 
         const rows = Array.from(merged.values())
-            .filter((c) => !search || c.phone.includes(search) || String(c?.lastMessage?.content || '').toLowerCase().includes(search))
+            .filter((c) => !search
+                || c.phone.includes(search)
+                || String(c?.name || '').toLowerCase().includes(search)
+                || String(c?.lastMessage?.content || '').toLowerCase().includes(search))
             .sort((a, b) => new Date(b.lastActivityAt || 0).getTime() - new Date(a.lastActivityAt || 0).getTime())
             .slice(0, limit);
 
@@ -999,7 +1064,7 @@ app.get('/api/ana/messages', (req, res) => {
     const tenantId = tenant?.id || 'default';
     const limit = Math.max(1, Math.min(300, Number(req.query?.limit || 80)));
     const evo = getEvolutionConfig(tenant, req.query?.instance || null);
-    const remoteJid = `${phone}@s.whatsapp.net`;
+    const remoteJid = String(req.query?.remoteJid || `${phone}@s.whatsapp.net`).trim();
 
     const run = async () => {
         const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
@@ -1092,6 +1157,7 @@ app.post('/api/ana/send', async (req, res) => {
         const resolvedInstance = pickBestEvolutionInstance(evo.instance, availableInstances);
 
         const text = String(req.body?.text || '').trim();
+        const remoteJid = String(req.body?.remoteJid || '').trim();
         const mediaBase64 = String(req.body?.mediaBase64 || '').trim();
         const mimeType = String(req.body?.mimeType || '').trim();
         const fileName = String(req.body?.fileName || '').trim();
@@ -1104,6 +1170,7 @@ app.post('/api/ana/send', async (req, res) => {
                 apiKey: evo.apiKey,
                 instance: resolvedInstance,
                 phone,
+                remoteJid,
                 base64: mediaBase64,
                 mimeType,
                 fileName,
@@ -1115,6 +1182,7 @@ app.post('/api/ana/send', async (req, res) => {
                 apiKey: evo.apiKey,
                 instance: resolvedInstance,
                 phone,
+                remoteJid,
                 text,
             });
         } else {
@@ -1128,6 +1196,7 @@ app.post('/api/ana/send', async (req, res) => {
         const key = `${tenantId}:${phone}`;
         const session = anaSessions.get(key);
         if (session) {
+            if (remoteJid) session.remoteJid = remoteJid;
             session.messages = Array.isArray(session.messages) ? session.messages : [];
             session.messages.push({
                 role: 'assistant',
@@ -1690,6 +1759,13 @@ app.post('/webhook/whatsapp', async (req, res) => {
         }
 
         const msg = payload.message || payload?.messages?.[0]?.message || {};
+        const contactName =
+            payload?.pushName ||
+            payload?.notify ||
+            payload?.contactName ||
+            payload?.senderName ||
+            payload?.profileName ||
+            '';
         const unwrapMessage = (m) =>
             m?.ephemeralMessage?.message
             || m?.viewOnceMessage?.message
@@ -1737,6 +1813,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
             tenant,
             rawMessage: msg,
             instanceName,
+            remoteJid,
+            contactName,
         });
         if (result?.reply) {
             log('INFO', `Ana -> ${phone}`, { tenantId, reply: result.reply.slice(0, 200) });

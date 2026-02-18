@@ -29,6 +29,7 @@
     instance: '',
     selectedPhone: '',
     selectedRemoteJid: '',
+    selectedConversation: null,
     conversations: [],
     recorder: null,
     audioChunks: [],
@@ -58,6 +59,21 @@
   function initialsFromPhone(phone) {
     const clean = String(phone || '').replace(/\D/g, '');
     return clean.slice(-2) || '--';
+  }
+
+  function displayName(conversation) {
+    const name = String(conversation && conversation.name ? conversation.name : '').trim();
+    return name || String(conversation && conversation.phone ? conversation.phone : '');
+  }
+
+  function renderAvatar(el, conversation) {
+    if (!el) return;
+    const avatarUrl = String(conversation && conversation.avatarUrl ? conversation.avatarUrl : '').trim();
+    if (avatarUrl) {
+      el.innerHTML = `<img src="${escapeHtml(avatarUrl)}" alt="avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />`;
+      return;
+    }
+    el.textContent = initialsFromPhone(conversation && conversation.phone);
   }
 
   function formatTime(iso) {
@@ -102,14 +118,16 @@
       item.innerHTML = `
         <div class="avatar">${initialsFromPhone(conversation.phone)}</div>
         <div>
-          <div class="name">${escapeHtml(conversation.phone)}</div>
+          <div class="name">${escapeHtml(displayName(conversation) || conversation.phone)}</div>
           <div class="preview">${preview}</div>
         </div>
         <div class="time">${formatTime(conversation.lastActivityAt)}</div>
       `;
+      renderAvatar(item.querySelector('.avatar'), conversation);
       item.onclick = async function () {
         state.selectedPhone = conversation.phone;
         state.selectedRemoteJid = conversation.remoteJid || `${conversation.phone}@s.whatsapp.net`;
+        state.selectedConversation = conversation;
         renderList();
         await loadControls();
         await loadMessages();
@@ -129,6 +147,12 @@
     }
 
     state.conversations = data.conversations || [];
+    if (state.selectedPhone) {
+      state.selectedConversation = state.conversations.find((c) => c.phone === state.selectedPhone) || state.selectedConversation;
+      if (state.selectedConversation && state.selectedConversation.remoteJid) {
+        state.selectedRemoteJid = state.selectedConversation.remoteJid;
+      }
+    }
     if (state.selectedPhone && !state.conversations.some((c) => c.phone === state.selectedPhone)) {
       state.selectedPhone = '';
       state.selectedRemoteJid = '';
@@ -140,6 +164,7 @@
       await loadControls();
       await loadMessages();
     } else {
+      state.selectedConversation = null;
       ui.messages.innerHTML = '';
       ui.contactAvatar.textContent = '--';
       ui.contactName.textContent = 'Selecione uma conversa';
@@ -161,20 +186,30 @@
 
   async function loadMessages() {
     if (!state.selectedPhone) return;
+    const selected = state.selectedConversation || { phone: state.selectedPhone, remoteJid: state.selectedRemoteJid };
+    const readableName = displayName(selected) || state.selectedPhone;
+    renderAvatar(ui.contactAvatar, selected);
+    ui.contactName.textContent = readableName;
+    ui.contactState.textContent = `Carregando... | Instância: ${state.instance || '-'}`;
 
-    const msgData = await fetchJson(`/api/ana/messages?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}&limit=80`);
-    const sessionData = await fetchJson(`/api/ana/session?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}`);
+    renderAvatar(ui.infoAvatar, selected);
+    ui.infoName.textContent = readableName || 'Sem contato';
+    ui.infoPhone.textContent = state.selectedPhone || '-';
+    ui.infoInstance.textContent = state.instance || '-';
+    ui.infoState.textContent = 'Carregando...';
+
+    let msgData = { messages: [] };
+    let sessionData = {};
+    try {
+      msgData = await fetchJson(`/api/ana/messages?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}&remoteJid=${encodeURIComponent(state.selectedRemoteJid || '')}&limit=80`);
+    } catch (_) {}
+    try {
+      sessionData = await fetchJson(`/api/ana/session?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}`);
+    } catch (_) {}
 
     const conversationState = (sessionData && sessionData.state) || 'INIT';
     const phone = state.selectedPhone;
-    const initials = initialsFromPhone(phone);
-
-    ui.contactAvatar.textContent = initials;
-    ui.contactName.textContent = phone;
     ui.contactState.textContent = `Estado: ${conversationState} | Instância: ${state.instance || '-'}`;
-
-    ui.infoAvatar.textContent = initials;
-    ui.infoName.textContent = phone;
     ui.infoPhone.textContent = phone;
     ui.infoInstance.textContent = state.instance || '-';
     ui.infoState.textContent = conversationState;
@@ -224,6 +259,7 @@
         tenant_id: state.tenantId,
         instance: state.instance || null,
         phone: state.selectedPhone,
+        remoteJid: state.selectedRemoteJid || null,
         text,
       }),
     });
@@ -259,6 +295,7 @@
         tenant_id: state.tenantId,
         instance: state.instance || null,
         phone: state.selectedPhone,
+        remoteJid: state.selectedRemoteJid || null,
         mediaBase64: base64,
         mimeType: file.type || 'application/octet-stream',
         fileName: file.name || 'arquivo.bin',
