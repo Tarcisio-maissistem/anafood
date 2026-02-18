@@ -346,19 +346,23 @@ const extractTextFromAnyMessage = (msg) => {
 
 const fetchEvolutionChats = async ({ apiUrl, apiKey, instance, limit = 50 }) => {
     if (!apiUrl || !apiKey || !instance) return [];
-    const endpoints = [
-        `${apiUrl}/chat/findChats/${instance}?page=1&limit=${limit}`,
-        `${apiUrl}/chat/findChats/${instance}?limit=${limit}`,
-        `${apiUrl}/chat/findChats/${instance}`,
-        `${apiUrl}/chat/fetchChats/${instance}?page=1&limit=${limit}`,
-        `${apiUrl}/chat/fetchChats/${instance}`,
+    const calls = [
+        { method: 'POST', url: `${apiUrl}/chat/findChats/${instance}`, body: { limit, page: 1 } },
+        { method: 'POST', url: `${apiUrl}/chat/findChats/${instance}`, body: { where: {}, limit } },
+        { method: 'POST', url: `${apiUrl}/chat/findChats/${instance}`, body: {} },
+        { method: 'GET', url: `${apiUrl}/chat/findChats/${instance}?page=1&limit=${limit}` },
+        { method: 'GET', url: `${apiUrl}/chat/findChats/${instance}?limit=${limit}` },
+        { method: 'GET', url: `${apiUrl}/chat/findChats/${instance}` },
+        { method: 'GET', url: `${apiUrl}/chat/fetchChats/${instance}?page=1&limit=${limit}` },
+        { method: 'GET', url: `${apiUrl}/chat/fetchChats/${instance}` },
     ];
 
-    for (const endpoint of endpoints) {
+    for (const call of calls) {
         try {
-            const response = await fetch(endpoint, {
-                method: 'GET',
+            const response = await fetch(call.url, {
+                method: call.method,
                 headers: { apikey: apiKey, Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+                ...(call.method !== 'GET' ? { body: JSON.stringify(call.body || {}) } : {}),
             });
             if (!response.ok) continue;
             const payload = await response.json().catch(() => ({}));
@@ -388,18 +392,23 @@ const fetchEvolutionChats = async ({ apiUrl, apiKey, instance, limit = 50 }) => 
 const fetchEvolutionMessages = async ({ apiUrl, apiKey, instance, remoteJid, limit = 80 }) => {
     if (!apiUrl || !apiKey || !instance || !remoteJid) return [];
     const encodedJid = encodeURIComponent(remoteJid);
-    const endpoints = [
-        `${apiUrl}/chat/findMessages/${instance}/${encodedJid}?page=1&limit=${limit}`,
-        `${apiUrl}/chat/findMessages/${instance}/${encodedJid}`,
-        `${apiUrl}/chat/findMessages/${instance}?remoteJid=${encodedJid}&page=1&limit=${limit}`,
-        `${apiUrl}/chat/findMessages/${instance}?remoteJid=${encodedJid}`,
+    const calls = [
+        { method: 'POST', url: `${apiUrl}/chat/findMessages/${instance}`, body: { where: { remoteJid }, limit } },
+        { method: 'POST', url: `${apiUrl}/chat/findMessages/${instance}`, body: { where: { key: { remoteJid } }, limit } },
+        { method: 'POST', url: `${apiUrl}/chat/findMessages/${instance}`, body: { remoteJid, limit } },
+        { method: 'POST', url: `${apiUrl}/chat/findMessages/${instance}/${encodedJid}`, body: { limit } },
+        { method: 'GET', url: `${apiUrl}/chat/findMessages/${instance}/${encodedJid}?page=1&limit=${limit}` },
+        { method: 'GET', url: `${apiUrl}/chat/findMessages/${instance}/${encodedJid}` },
+        { method: 'GET', url: `${apiUrl}/chat/findMessages/${instance}?remoteJid=${encodedJid}&page=1&limit=${limit}` },
+        { method: 'GET', url: `${apiUrl}/chat/findMessages/${instance}?remoteJid=${encodedJid}` },
     ];
 
-    for (const endpoint of endpoints) {
+    for (const call of calls) {
         try {
-            const response = await fetch(endpoint, {
-                method: 'GET',
+            const response = await fetch(call.url, {
+                method: call.method,
                 headers: { apikey: apiKey, Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+                ...(call.method !== 'GET' ? { body: JSON.stringify(call.body || {}) } : {}),
             });
             if (!response.ok) continue;
             const payload = await response.json().catch(() => ({}));
@@ -425,6 +434,49 @@ const fetchEvolutionMessages = async ({ apiUrl, apiKey, instance, remoteJid, lim
         }
     }
 
+    return [];
+};
+
+const fetchEvolutionContacts = async ({ apiUrl, apiKey, instance, limit = 50 }) => {
+    if (!apiUrl || !apiKey || !instance) return [];
+    const calls = [
+        { method: 'POST', url: `${apiUrl}/chat/findContacts/${instance}`, body: { where: {}, limit } },
+        { method: 'POST', url: `${apiUrl}/chat/findContacts/${instance}`, body: {} },
+        { method: 'GET', url: `${apiUrl}/chat/findContacts/${instance}?limit=${limit}` },
+        { method: 'GET', url: `${apiUrl}/chat/findContacts/${instance}` },
+    ];
+
+    for (const call of calls) {
+        try {
+            const response = await fetch(call.url, {
+                method: call.method,
+                headers: { apikey: apiKey, Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+                ...(call.method !== 'GET' ? { body: JSON.stringify(call.body || {}) } : {}),
+            });
+            if (!response.ok) continue;
+            const payload = await response.json().catch(() => ({}));
+            const rows = toArrayPayload(payload);
+            if (!rows.length) continue;
+
+            return rows.slice(0, limit).map((row) => {
+                const remoteJid =
+                    row?.remoteJid ||
+                    row?.id ||
+                    row?.jid ||
+                    row?.key?.remoteJid ||
+                    '';
+                const phone = String(remoteJid).split('@')[0].replace(/\D/g, '');
+                return {
+                    phone,
+                    remoteJid: remoteJid || (phone ? `${phone}@s.whatsapp.net` : ''),
+                    lastMessage: null,
+                    lastActivityAt: null,
+                };
+            }).filter((c) => c.phone);
+        } catch (_) {
+            // try next endpoint
+        }
+    }
     return [];
 };
 
@@ -870,12 +922,20 @@ app.get('/api/ana/conversations', (req, res) => {
         const resolvedInstance = pickBestEvolutionInstance(evo.instance, availableInstances);
         const webhookUrl = process.env.WEBHOOK_PUBLIC_URL || `${req.protocol}://${req.get('host')}/webhook/whatsapp`;
         await ensureEvolutionWebhook({ apiUrl: evo.apiUrl, apiKey: evo.apiKey, instance: resolvedInstance, webhookUrl });
-        const evolutionRows = await fetchEvolutionChats({
+        let evolutionRows = await fetchEvolutionChats({
             apiUrl: evo.apiUrl,
             apiKey: evo.apiKey,
             instance: resolvedInstance,
             limit,
         });
+        if (!evolutionRows.length) {
+            evolutionRows = await fetchEvolutionContacts({
+                apiUrl: evo.apiUrl,
+                apiKey: evo.apiKey,
+                instance: resolvedInstance,
+                limit,
+            });
+        }
 
         const merged = new Map();
         for (const row of evolutionRows) {
