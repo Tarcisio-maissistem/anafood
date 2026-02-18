@@ -1,5 +1,6 @@
 ﻿(function () {
   const ui = {
+    appRoot: document.querySelector('.app'),
     instanceInfo: document.getElementById('instanceInfo'),
     refreshBtn: document.getElementById('refreshBtn'),
     searchInput: document.getElementById('searchInput'),
@@ -33,6 +34,12 @@
     audioChunks: [],
     poller: null,
   };
+
+  function syncContactPanelVisibility() {
+    if (!ui.appRoot) return;
+    const hasSelection = Boolean(state.selectedPhone);
+    ui.appRoot.classList.toggle('contact-selected', hasSelection);
+  }
 
   function escapeHtml(value) {
     return String(value || '')
@@ -86,6 +93,7 @@
   }
 
   function renderList() {
+    syncContactPanelVisibility();
     ui.list.innerHTML = '';
     for (const conversation of state.conversations) {
       const item = document.createElement('div');
@@ -121,9 +129,9 @@
     }
 
     state.conversations = data.conversations || [];
-    if (!state.selectedPhone && state.conversations.length) {
-      state.selectedPhone = state.conversations[0].phone;
-      state.selectedRemoteJid = state.conversations[0].remoteJid || `${state.selectedPhone}@s.whatsapp.net`;
+    if (state.selectedPhone && !state.conversations.some((c) => c.phone === state.selectedPhone)) {
+      state.selectedPhone = '';
+      state.selectedRemoteJid = '';
     }
 
     renderList();
@@ -131,6 +139,16 @@
     if (state.selectedPhone) {
       await loadControls();
       await loadMessages();
+    } else {
+      ui.messages.innerHTML = '';
+      ui.contactAvatar.textContent = '--';
+      ui.contactName.textContent = 'Selecione uma conversa';
+      ui.contactState.textContent = 'Sem contato selecionado';
+      ui.infoAvatar.textContent = '--';
+      ui.infoName.textContent = 'Sem contato';
+      ui.infoPhone.textContent = 'Selecione uma conversa para visualizar os dados.';
+      ui.infoState.textContent = '-';
+      syncContactPanelVisibility();
     }
   }
 

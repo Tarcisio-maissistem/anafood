@@ -300,11 +300,31 @@ const sendEvolutionMedia = async ({ apiUrl, apiKey, instance, phone, base64, mim
 const toArrayPayload = (payload) => {
     if (Array.isArray(payload)) return payload;
     if (Array.isArray(payload?.data)) return payload.data;
+    if (Array.isArray(payload?.data?.data)) return payload.data.data;
     if (Array.isArray(payload?.result)) return payload.result;
+    if (Array.isArray(payload?.results)) return payload.results;
+    if (Array.isArray(payload?.response)) return payload.response;
     if (Array.isArray(payload?.chats)) return payload.chats;
+    if (Array.isArray(payload?.data?.chats)) return payload.data.chats;
     if (Array.isArray(payload?.messages)) return payload.messages;
+    if (Array.isArray(payload?.data?.messages)) return payload.data.messages;
     if (Array.isArray(payload?.records)) return payload.records;
     return [];
+};
+
+const extractRemoteJidFromChat = (chat) => {
+    const id = chat?.id;
+    if (typeof id === 'string') return id;
+    if (typeof id?.id === 'string') return id.id;
+    if (typeof id?._serialized === 'string') return id._serialized;
+    return (
+        chat?.remoteJid ||
+        chat?.jid ||
+        chat?.key?.remoteJid ||
+        chat?.chatId ||
+        chat?.conversationId ||
+        ''
+    );
 };
 
 const extractTextFromAnyMessage = (msg) => {
@@ -346,7 +366,7 @@ const fetchEvolutionChats = async ({ apiUrl, apiKey, instance, limit = 50 }) => 
             if (!chats.length) continue;
 
             return chats.slice(0, limit).map((chat) => {
-                const remoteJid = chat?.id || chat?.remoteJid || chat?.jid || chat?.key?.remoteJid || '';
+                const remoteJid = extractRemoteJidFromChat(chat);
                 const phone = String(remoteJid).split('@')[0].replace(/\D/g, '');
                 const lastMessageText = extractTextFromAnyMessage(chat?.lastMessage || chat?.message || chat);
                 const ts = chat?.conversationTimestamp || chat?.timestamp || chat?.t || chat?.lastMessageTimestamp || null;
@@ -452,15 +472,52 @@ const fetchEvolutionInstances = async ({ apiUrl, apiKey }) => {
 };
 
 const pickBestEvolutionInstance = (configuredInstance, availableInstances = []) => {
-    const names = availableInstances.map((i) => i.name);
-    const open = availableInstances.find((i) => i.state === 'open' || i.state === 'connected');
+    const byName = new Map(availableInstances.map((i) => [i.name, i]));
+    const configured = configuredInstance ? byName.get(configuredInstance) : null;
+    const open = availableInstances.find((i) => ['open', 'connected'].includes(i.state));
     const connecting = availableInstances.find((i) => i.state === 'connecting');
 
-    if (configuredInstance && names.includes(configuredInstance)) return configuredInstance;
+    if (configured && ['open', 'connected'].includes(configured.state)) return configured.name;
     if (open?.name) return open.name;
+    if (configured && configured.state === 'connecting') return configured.name;
     if (connecting?.name) return connecting.name;
+    if (configured?.name) return configured.name;
     if (availableInstances[0]?.name) return availableInstances[0].name;
     return configuredInstance || '';
+};
+
+const ensureEvolutionWebhook = async ({ apiUrl, apiKey, instance, webhookUrl }) => {
+    if (!apiUrl || !apiKey || !instance || !webhookUrl) return { ok: false, skipped: true };
+
+    const cleanUrl = String(webhookUrl || '').trim();
+    const headers = { apikey: apiKey, Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+    const payloads = [
+        { enabled: true, url: cleanUrl, webhook: cleanUrl, events: ['MESSAGES_UPSERT'] },
+        { webhook: { enabled: true, url: cleanUrl, events: ['MESSAGES_UPSERT'] } },
+        { webhook: cleanUrl, enabled: true },
+    ];
+    const calls = [
+        { method: 'POST', url: `${apiUrl}/webhook/set/${instance}` },
+        { method: 'PUT', url: `${apiUrl}/webhook/set/${instance}` },
+        { method: 'POST', url: `${apiUrl}/webhook/update/${instance}` },
+        { method: 'PUT', url: `${apiUrl}/webhook/update/${instance}` },
+    ];
+
+    for (const call of calls) {
+        for (const body of payloads) {
+            try {
+                const response = await fetch(call.url, {
+                    method: call.method,
+                    headers,
+                    body: JSON.stringify(body),
+                });
+                if (response.ok) return { ok: true };
+            } catch (_) {
+                // keep trying alternative endpoint/payload
+            }
+        }
+    }
+    return { ok: false };
 };
 
 const getTenantFromRequest = (req) => {
@@ -755,12 +812,15 @@ app.get('/api/ana/default-instance', async (req, res) => {
         const evo = getEvolutionConfig(tenant, req.query?.instance || null);
         const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
         const instance = pickBestEvolutionInstance(evo.instance, availableInstances);
+        const webhookUrl = process.env.WEBHOOK_PUBLIC_URL || `${req.protocol}://${req.get('host')}/webhook/whatsapp`;
+        const webhook = await ensureEvolutionWebhook({ apiUrl: evo.apiUrl, apiKey: evo.apiKey, instance, webhookUrl });
         return res.json({
             success: true,
             tenantId,
             instance,
             configuredInstance: evo.instance,
             availableInstances,
+            webhook,
         });
     } catch (error) {
         handleError(res, error);
@@ -808,6 +868,8 @@ app.get('/api/ana/conversations', (req, res) => {
     const buildResponse = async () => {
         const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
         const resolvedInstance = pickBestEvolutionInstance(evo.instance, availableInstances);
+        const webhookUrl = process.env.WEBHOOK_PUBLIC_URL || `${req.protocol}://${req.get('host')}/webhook/whatsapp`;
+        await ensureEvolutionWebhook({ apiUrl: evo.apiUrl, apiKey: evo.apiKey, instance: resolvedInstance, webhookUrl });
         const evolutionRows = await fetchEvolutionChats({
             apiUrl: evo.apiUrl,
             apiKey: evo.apiKey,

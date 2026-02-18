@@ -605,8 +605,8 @@ async function maybeSummarize({ runtime, conversation }) {
 }
 
 async function sendWhatsAppMessage(phone, text, runtime) {
-  const { apiUrl, apiKey, instance } = runtime.evolution;
-  if (!apiUrl || !apiKey || !instance) return false;
+  const { apiUrl, apiKey } = runtime.evolution;
+  if (!apiUrl || !apiKey) return false;
 
   const safeText = cleanText(text);
   if (!safeText) return false;
@@ -615,10 +615,59 @@ async function sendWhatsAppMessage(phone, text, runtime) {
   const digitsPhone = rawPhone.replace(/\D/g, '');
   const numbers = Array.from(new Set([rawPhone, digitsPhone, digitsPhone ? `${digitsPhone}@s.whatsapp.net` : ''].filter(Boolean)));
 
-  const endpoints = [
-    `${apiUrl}/message/sendText/${instance}`,
-    `${apiUrl}/message/sendText/${instance}?delay=600`,
-  ];
+  async function fetchInstances() {
+    const endpoints = [
+      `${apiUrl}/instance/fetchInstances`,
+      `${apiUrl}/instance/findInstances`,
+      `${apiUrl}/instance/list`,
+      `${apiUrl}/instance/all`,
+    ];
+    for (const endpoint of endpoints) {
+      try {
+        const response = await fetch(endpoint, {
+          method: 'GET',
+          headers: {
+            apikey: apiKey,
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+        });
+        if (!response.ok) continue;
+        const payload = await response.json().catch(() => ({}));
+        const rows = Array.isArray(payload) ? payload
+          : Array.isArray(payload?.data) ? payload.data
+            : Array.isArray(payload?.result) ? payload.result
+              : [];
+        if (!rows.length) continue;
+        return rows.map((row) => ({
+          name: String(row?.instance?.instanceName || row?.instanceName || row?.name || row?.instance || ''),
+          state: String(row?.instance?.state || row?.state || row?.status || '').toLowerCase(),
+        })).filter((r) => r.name);
+      } catch (_) {}
+    }
+    return [];
+  }
+
+  function bestInstance(instances, preferred) {
+    const byName = new Map(instances.map((i) => [i.name, i]));
+    const pref = preferred ? byName.get(preferred) : null;
+    const open = instances.find((i) => ['open', 'connected'].includes(i.state));
+    const connecting = instances.find((i) => i.state === 'connecting');
+    if (pref && ['open', 'connected'].includes(pref.state)) return pref.name;
+    if (open?.name) return open.name;
+    if (pref && pref.state === 'connecting') return pref.name;
+    if (connecting?.name) return connecting.name;
+    if (pref?.name) return pref.name;
+    return instances[0]?.name || preferred || '';
+  }
+
+  const candidates = [];
+  if (runtime.evolution.instance) candidates.push(runtime.evolution.instance);
+  try {
+    const instances = await fetchInstances();
+    const chosen = bestInstance(instances, runtime.evolution.instance);
+    if (chosen && !candidates.includes(chosen)) candidates.unshift(chosen);
+  } catch (_) {}
 
   const payloads = [
     { number: null, text: safeText, delay: 600 },
@@ -647,22 +696,29 @@ async function sendWhatsAppMessage(phone, text, runtime) {
   };
 
   let lastErr = null;
-  for (const number of numbers) {
-    for (const endpoint of endpoints) {
-      for (const payloadTemplate of payloads) {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            await postJson(endpoint, { ...payloadTemplate, number });
-            return true;
-          } catch (err) {
-            lastErr = err;
-            if (err.status === 400 || err.status === 404) break;
+  for (const activeInstance of candidates) {
+    const endpoints = [
+      `${apiUrl}/message/sendText/${activeInstance}`,
+      `${apiUrl}/message/sendText/${activeInstance}?delay=600`,
+    ];
+    for (const number of numbers) {
+      for (const endpoint of endpoints) {
+        for (const payloadTemplate of payloads) {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              await postJson(endpoint, { ...payloadTemplate, number });
+              runtime.evolution.instance = activeInstance;
+              return true;
+            } catch (err) {
+              lastErr = err;
+              if (err.status === 400 || err.status === 404) break;
+            }
           }
         }
       }
     }
   }
-  console.error(`[ANA] Nao foi possivel enviar WhatsApp para ${phone} (instance=${instance}):`, lastErr?.details || lastErr?.message || 'unknown error');
+  console.error(`[ANA] Nao foi possivel enviar WhatsApp para ${phone} (instance=${runtime.evolution.instance || '-' }):`, lastErr?.details || lastErr?.message || 'unknown error');
   return false;
 }
 

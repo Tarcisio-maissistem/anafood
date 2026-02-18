@@ -34,11 +34,12 @@
       height: 100vh;
       margin: 0 auto;
       display: grid;
-      grid-template-columns: var(--panel-width) 1fr var(--info-width);
+      grid-template-columns: var(--panel-width) 1fr;
       border-left: 1px solid #0a161c;
       border-right: 1px solid #0a161c;
       box-shadow: 0 10px 35px rgba(0, 0, 0, 0.35);
     }
+    .app.contact-selected { grid-template-columns: var(--panel-width) 1fr var(--info-width); }
     .left, .middle, .right {
       min-height: 0;
       display: flex;
@@ -46,7 +47,8 @@
     }
     .left { background: var(--bg-left); border-right: 1px solid var(--line); }
     .middle { background: var(--bg-mid); border-right: 1px solid var(--line); }
-    .right { background: var(--bg-right); }
+    .right { background: var(--bg-right); display: none; }
+    .app.contact-selected .right { display: flex; }
     .head {
       background: var(--bg-head);
       border-bottom: 1px solid var(--line);
@@ -247,7 +249,8 @@
     }
     .flags input { accent-color: var(--accent); }
     @media (max-width: 1400px) {
-      .app { grid-template-columns: 340px 1fr 320px; }
+      .app { grid-template-columns: 340px 1fr; }
+      .app.contact-selected { grid-template-columns: 340px 1fr 320px; }
     }
     @media (max-width: 1120px) {
       .app { grid-template-columns: 1fr; }
