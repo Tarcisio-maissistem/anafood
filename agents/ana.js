@@ -615,14 +615,26 @@ async function sendWhatsAppMessage(phone, text, runtime) {
   const digitsPhone = rawPhone.replace(/\D/g, '');
   const numbers = Array.from(new Set([rawPhone, digitsPhone, digitsPhone ? `${digitsPhone}@s.whatsapp.net` : ''].filter(Boolean)));
 
-  const postJson = async (number) => {
-    const response = await fetch(`${apiUrl}/message/sendText/${instance}`, {
+  const endpoints = [
+    `${apiUrl}/message/sendText/${instance}`,
+    `${apiUrl}/message/sendText/${instance}?delay=600`,
+  ];
+
+  const payloads = [
+    { number: null, text: safeText, delay: 600 },
+    { number: null, textMessage: { text: safeText }, options: { delay: 600 } },
+    { number: null, textMessage: { text: safeText } },
+  ];
+
+  const postJson = async (url, body) => {
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         apikey: apiKey,
+        Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ number, text: safeText, delay: 600 }),
+      body: JSON.stringify(body),
     });
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '');
@@ -631,21 +643,26 @@ async function sendWhatsAppMessage(phone, text, runtime) {
       err.details = bodyText;
       throw err;
     }
+    return true;
   };
 
   let lastErr = null;
   for (const number of numbers) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        await postJson(number);
-        return true;
-      } catch (err) {
-        lastErr = err;
-        if (err.status === 400) break;
+    for (const endpoint of endpoints) {
+      for (const payloadTemplate of payloads) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            await postJson(endpoint, { ...payloadTemplate, number });
+            return true;
+          } catch (err) {
+            lastErr = err;
+            if (err.status === 400 || err.status === 404) break;
+          }
+        }
       }
     }
   }
-  console.error(`[ANA] Nao foi possivel enviar WhatsApp para ${phone}:`, lastErr?.details || lastErr?.message || 'unknown error');
+  console.error(`[ANA] Nao foi possivel enviar WhatsApp para ${phone} (instance=${instance}):`, lastErr?.details || lastErr?.message || 'unknown error');
   return false;
 }
 

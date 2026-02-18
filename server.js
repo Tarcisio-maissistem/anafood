@@ -178,9 +178,12 @@ const getTenantFromRequest = (req) => {
     const instanceName =
         req.body?.instance ||
         req.body?.instanceName ||
+        req.body?.instance?.instanceName ||
+        req.body?.instance?.name ||
         payload.instance ||
+        payload?.instance?.instanceName ||
+        payload?.instance?.name ||
         payload.instanceName ||
-        payload.sender ||
         payload?.messages?.[0]?.instance ||
         null;
 
