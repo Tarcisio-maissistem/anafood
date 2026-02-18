@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
@@ -6,110 +6,318 @@
   <title>Conversas</title>
   <style>
     :root {
-      --app-bg: #0a1014;
-      --panel-left: #111b21;
-      --panel-right: #0b141a;
-      --header: #202c33;
+      --bg-app: #0b141a;
+      --bg-left: #111b21;
+      --bg-mid: #0b141a;
+      --bg-right: #111b21;
+      --bg-head: #202c33;
       --line: #2a3942;
       --text: #e9edef;
       --muted: #8696a0;
       --accent: #00a884;
-      --chat-bg: #111b21;
-      --in: #1f2c34;
-      --out: #005c4b;
+      --outgoing: #005c4b;
+      --incoming: #1f2c34;
+      --panel-width: 390px;
+      --info-width: 380px;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--app-bg); color: var(--text); font-family: Segoe UI, Arial, sans-serif; }
-    .wrap { width: min(1600px, 100vw); height: 100vh; margin: 0 auto; display: grid; grid-template-columns: 380px 1fr; }
-    .left { background: var(--panel-left); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
-    .left-head { background: var(--header); border-bottom: 1px solid var(--line); padding: 10px 12px; }
-    .left-head .row { display: flex; gap: 8px; align-items: center; }
-    .avatar { width: 36px; height: 36px; border-radius: 50%; background: #2a3942; display: grid; place-items: center; font-weight: 700; }
-    .title { font-size: 14px; font-weight: 700; }
-    .sub { font-size: 12px; color: var(--muted); }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        linear-gradient(180deg, #00a884 0 130px, transparent 130px),
+        var(--bg-app);
+      font-family: "Segoe UI", Arial, sans-serif;
+    }
+    .app {
+      width: min(1720px, 100vw);
+      height: 100vh;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: var(--panel-width) 1fr var(--info-width);
+      border-left: 1px solid #0a161c;
+      border-right: 1px solid #0a161c;
+      box-shadow: 0 10px 35px rgba(0, 0, 0, 0.35);
+    }
+    .left, .middle, .right {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .left { background: var(--bg-left); border-right: 1px solid var(--line); }
+    .middle { background: var(--bg-mid); border-right: 1px solid var(--line); }
+    .right { background: var(--bg-right); }
+    .head {
+      background: var(--bg-head);
+      border-bottom: 1px solid var(--line);
+      min-height: 60px;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: #2a3942;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 15px;
+      color: #d2dae0;
+      flex: 0 0 auto;
+    }
+    .grow { flex: 1; min-width: 0; }
+    .title {
+      font-size: 17px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .sub {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .btn {
+      background: #1f2a31;
+      border: 1px solid #2c3d47;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 10px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #05271f;
+      font-weight: 700;
+    }
     .search { padding: 8px 12px; border-bottom: 1px solid #172027; }
-    .search input { width: 100%; background: #202c33; border: 1px solid #2b3c46; border-radius: 8px; color: var(--text); padding: 10px 12px; }
-    .list { overflow: auto; flex: 1; }
-    .item { padding: 12px; border-bottom: 1px solid #172027; cursor: pointer; display: grid; grid-template-columns: 48px 1fr auto; gap: 10px; align-items: center; }
-    .item:hover, .item.active { background: #202c33; }
-    .item .bubble-avatar { width: 44px; height: 44px; border-radius: 50%; background: #2a3942; display: grid; place-items: center; font-size: 13px; font-weight: 700; }
-    .item .name { font-weight: 600; font-size: 14px; }
-    .item .preview { color: var(--muted); font-size: 12px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+    .search input {
+      width: 100%;
+      border: 1px solid #2b3c46;
+      border-radius: 8px;
+      background: #202c33;
+      color: var(--text);
+      padding: 10px 12px;
+      outline: none;
+    }
+    .list { flex: 1; overflow: auto; }
+    .item {
+      cursor: pointer;
+      display: grid;
+      grid-template-columns: 52px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 11px 12px;
+      border-bottom: 1px solid #172027;
+    }
+    .item:hover { background: #1f2a31; }
+    .item.active { background: #2a3942; }
+    .item .name {
+      font-size: 15px;
+      font-weight: 500;
+      margin-bottom: 3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .item .preview {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 230px;
+    }
     .item .time { color: var(--muted); font-size: 11px; }
-    .right { background: var(--panel-right); display: flex; flex-direction: column; }
-    .right-head { background: var(--header); border-bottom: 1px solid var(--line); padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-    .contact { display: flex; gap: 10px; align-items: center; }
-    .contact .meta .name { font-weight: 700; font-size: 14px; }
-    .contact .meta .state { color: var(--muted); font-size: 12px; }
-    .controls { display: flex; gap: 12px; align-items: center; font-size: 12px; color: var(--muted); }
-    .controls label { display: inline-flex; align-items: center; gap: 6px; }
-    .messages { flex: 1; overflow: auto; padding: 16px; background: radial-gradient(rgba(255,255,255,.03) 1px, transparent 1px); background-size: 22px 22px; }
-    .msg { display: flex; margin-bottom: 10px; }
+    .messages {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 18px 24px;
+      background:
+        radial-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        #0f1a20;
+      background-size: 22px 22px;
+    }
+    .msg { display: flex; margin-bottom: 9px; }
     .msg.user { justify-content: flex-start; }
     .msg.assistant { justify-content: flex-end; }
-    .msg .content { max-width: 68%; background: var(--in); padding: 8px 10px; border-radius: 8px; line-height: 1.35; font-size: 14px; white-space: pre-wrap; word-wrap: break-word; }
-    .msg.assistant .content { background: var(--out); }
-    .msg .at { margin-top: 4px; color: #bfd7ce; font-size: 11px; text-align: right; }
+    .bubble {
+      max-width: 70%;
+      padding: 7px 9px;
+      border-radius: 8px;
+      line-height: 1.35;
+      font-size: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      box-shadow: 0 1px 1px rgba(0,0,0,0.25);
+    }
+    .msg.user .bubble { background: var(--incoming); }
+    .msg.assistant .bubble { background: var(--outgoing); }
+    .at {
+      margin-top: 4px;
+      text-align: right;
+      font-size: 11px;
+      color: #b7c7c0;
+    }
     .msg.user .at { color: var(--muted); }
-    .composer { border-top: 1px solid var(--line); background: var(--header); display: grid; grid-template-columns: auto auto 1fr auto; gap: 8px; padding: 10px; align-items: center; }
-    .composer button, .composer input[type=file] { background: #1f2a31; border: 1px solid #2c3d47; color: var(--text); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
-    .composer textarea { width: 100%; min-height: 42px; max-height: 120px; resize: vertical; background: #111b21; border: 1px solid #2c3d47; color: var(--text); border-radius: 8px; padding: 10px; }
-    .composer .send { background: var(--accent); color: #06241d; border-color: var(--accent); font-weight: 700; }
-    .status { border-top: 1px dashed var(--line); color: var(--muted); font-size: 12px; padding: 6px 10px; }
+    .composer {
+      border-top: 1px solid var(--line);
+      background: var(--bg-head);
+      padding: 10px 12px;
+      display: grid;
+      grid-template-columns: auto auto 1fr auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .composer textarea {
+      width: 100%;
+      min-height: 42px;
+      max-height: 140px;
+      resize: vertical;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid #2c3d47;
+      background: #111b21;
+      color: var(--text);
+      outline: none;
+    }
+    .status {
+      border-top: 1px dashed var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      padding: 7px 12px;
+      min-height: 30px;
+    }
     .ok { color: #7de7be; }
     .warn { color: #ffd27a; }
     .err { color: #ff8a93; }
-    @media (max-width: 1024px) {
-      .wrap { grid-template-columns: 1fr; }
-      .left { height: 42vh; }
-      .right { height: 58vh; }
+    .pane {
+      padding: 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .pane h3 {
+      margin: 0 0 12px 0;
+      font-size: 14px;
+      color: #c6d2d9;
+      font-weight: 600;
+    }
+    .profile {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding: 28px 18px;
+    }
+    .profile .avatar {
+      width: 120px;
+      height: 120px;
+      font-size: 40px;
+      background: #2a3942;
+    }
+    .profile .name {
+      font-size: 22px;
+      font-weight: 500;
+      text-align: center;
+      word-break: break-word;
+    }
+    .profile .meta {
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    .flags label {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 10px;
+      color: #d2dae0;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .flags input { accent-color: var(--accent); }
+    @media (max-width: 1400px) {
+      .app { grid-template-columns: 340px 1fr 320px; }
+    }
+    @media (max-width: 1120px) {
+      .app { grid-template-columns: 1fr; }
+      .right { display: none; }
+      .left { border-right: none; border-bottom: 1px solid var(--line); max-height: 42vh; }
+      .middle { min-height: 58vh; border-right: none; }
       .composer { grid-template-columns: auto 1fr auto; }
-      .composer #recordBtn { display: none; }
+      #recordBtn { display: none; }
     }
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <div class="app">
     <section class="left">
-      <div class="left-head">
-        <div class="row">
-          <div class="avatar">A</div>
-          <div style="flex:1">
-            <div class="title">Conversas</div>
-            <div id="instanceInfo" class="sub">Instância: carregando...</div>
-          </div>
-          <button id="refreshBtn" style="background:#1f2a31;border:1px solid #2c3d47;color:#e9edef;border-radius:8px;padding:8px 10px;cursor:pointer;">Atualizar</button>
+      <div class="head">
+        <div class="avatar">A</div>
+        <div class="grow">
+          <div class="title">Conversas</div>
+          <div id="instanceInfo" class="sub">Instância padrão: carregando...</div>
         </div>
+        <button id="refreshBtn" class="btn">Atualizar</button>
       </div>
       <div class="search">
-        <input id="searchInput" placeholder="Pesquisar conversa" />
+        <input id="searchInput" placeholder="Pesquisar ou começar nova conversa" />
       </div>
       <div id="list" class="list"></div>
     </section>
-    <section class="right">
-      <div class="right-head">
-        <div class="contact">
-          <div class="bubble-avatar" id="contactAvatar">--</div>
-          <div class="meta">
-            <div id="contactName" class="name">Selecione uma conversa</div>
-            <div id="contactState" class="state">Sem contato selecionado</div>
-          </div>
-        </div>
-        <div class="controls">
-          <label><input id="pauseToggle" type="checkbox" /> Pausar agente</label>
-          <label><input id="blockToggle" type="checkbox" /> Bloquear contato</label>
+
+    <section class="middle">
+      <div class="head">
+        <div id="contactAvatar" class="avatar">--</div>
+        <div class="grow">
+          <div id="contactName" class="title">Selecione uma conversa</div>
+          <div id="contactState" class="sub">Sem contato selecionado</div>
         </div>
       </div>
       <div id="messages" class="messages"></div>
       <div class="composer">
-        <button id="attachBtn">Arquivo</button>
-        <button id="recordBtn">Gravar</button>
+        <button id="attachBtn" class="btn">Arquivo</button>
+        <button id="recordBtn" class="btn">Gravar</button>
         <textarea id="textInput" placeholder="Digite uma mensagem"></textarea>
-        <button id="sendBtn" class="send">Enviar</button>
+        <button id="sendBtn" class="btn primary">Enviar</button>
         <input id="fileInput" type="file" hidden />
       </div>
       <div id="status" class="status">Carregando inbox...</div>
     </section>
+
+    <aside class="right">
+      <div class="head">
+        <div class="title">Informações do contato</div>
+      </div>
+      <div class="profile">
+        <div id="infoAvatar" class="avatar">--</div>
+        <div id="infoName" class="name">Sem contato</div>
+        <div id="infoPhone" class="meta">Selecione uma conversa para visualizar os dados.</div>
+      </div>
+      <div class="pane flags">
+        <h3>Ações</h3>
+        <label><input id="pauseToggle" type="checkbox" /> Pausar agente</label>
+        <label><input id="blockToggle" type="checkbox" /> Bloquear contato</label>
+      </div>
+      <div class="pane">
+        <h3>Instância ativa</h3>
+        <div id="infoInstance" class="sub">-</div>
+      </div>
+      <div class="pane">
+        <h3>Estado da conversa</h3>
+        <div id="infoState" class="sub">-</div>
+      </div>
+    </aside>
   </div>
   <script src="/conversas.js"></script>
 </body>
