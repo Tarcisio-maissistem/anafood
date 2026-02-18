@@ -1,0 +1,1 @@
+import{ak as t,ca as f,cb as i}from"./index-v68zVK4x.js";function c(n){return r=>{const u=(n?Math[n]:Math.trunc)(r);return u===0?0:u}}function d(n,r){return+t(n)-+t(r)}function s(n,r,e){const u=d(n,r)/f;return c(e==null?void 0:e.roundingMethod)(u)}function o(n,r,e){const u=d(n,r)/i;return c(e==null?void 0:e.roundingMethod)(u)}export{s as a,o as d};
