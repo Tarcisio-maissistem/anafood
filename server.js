@@ -65,6 +65,18 @@ const log = (type, message, data = null) => {
     console.log(`[${type}] [${ts}] ${message}${extra}`);
 };
 
+const logConversationEvent = ({ direction, source, tenantId, instance, phone, remoteJid, text }) => {
+    const preview = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    const side = direction === 'OUT' ? '->' : '<-';
+    log('CHAT', `${side} ${source || 'unknown'} ${phone || '-'} ${preview}`, {
+        tenantId: tenantId || 'default',
+        instance: instance || null,
+        phone: phone || null,
+        remoteJid: remoteJid || null,
+        chars: preview.length,
+    });
+};
+
 const getEnvConfig = (environment, tenant = null) => {
     const env = (environment || 'homologation').toLowerCase();
     const tenantSaipos = tenant?.saipos?.[env];
@@ -899,6 +911,16 @@ app.post('/api/ana/simulate', async (req, res) => {
             instanceName: req.body?.instance || req.body?.instanceName || null,
         });
         const tenantId = tenant?.id || 'default';
+        const simulatedRemoteJid = req.body?.remoteJid || (phone ? `${phone}@s.whatsapp.net` : null);
+        logConversationEvent({
+            direction: 'IN',
+            source: 'simulate',
+            tenantId,
+            instance: req.body?.instance || req.body?.instanceName || null,
+            phone,
+            remoteJid: simulatedRemoteJid,
+            text,
+        });
 
         const boundApiRequest = (environment, method, apiPath, body = null) =>
             apiRequest(environment, method, apiPath, body, tenant);
@@ -913,6 +935,17 @@ app.post('/api/ana/simulate', async (req, res) => {
             instanceName: req.body?.instance || req.body?.instanceName || null,
             remoteJid: req.body?.remoteJid || null,
             contactName: req.body?.contactName || '',
+            onSend: ({ phone: sentPhone, text: sentText, remoteJid: sentRemoteJid, instance: sentInstance }) => {
+                logConversationEvent({
+                    direction: 'OUT',
+                    source: 'agent',
+                    tenantId,
+                    instance: sentInstance,
+                    phone: sentPhone,
+                    remoteJid: sentRemoteJid,
+                    text: sentText,
+                });
+            },
         });
 
         return res.json({
@@ -1250,6 +1283,19 @@ app.post('/api/ana/send', async (req, res) => {
         if (!result?.ok) {
             return res.status(502).json({ success: false, error: result?.error || 'Falha ao enviar mensagem' });
         }
+
+        const outboundText = mediaBase64
+            ? `[midia] ${caption || fileName || mimeType || 'arquivo'}`
+            : text;
+        logConversationEvent({
+            direction: 'OUT',
+            source: 'manual',
+            tenantId,
+            instance: resolvedInstance,
+            phone,
+            remoteJid,
+            text: outboundText,
+        });
 
         const key = `${tenantId}:${phone}`;
         const session = anaSessions.get(key);
@@ -1863,7 +1909,15 @@ app.post('/webhook/whatsapp', async (req, res) => {
             return;
         }
 
-        log('INFO', `WhatsApp recebido de ${phone}`, { tenantId, text: text.slice(0, 80), remoteJid, instanceName });
+        logConversationEvent({
+            direction: 'IN',
+            source: 'whatsapp',
+            tenantId,
+            instance: instanceName,
+            phone,
+            remoteJid,
+            text: text || (hasAudio ? '[audio]' : ''),
+        });
 
         const boundApiRequest = (environment, method, apiPath, body = null) =>
             apiRequest(environment, method, apiPath, body, tenant);
@@ -1878,6 +1932,17 @@ app.post('/webhook/whatsapp', async (req, res) => {
             instanceName,
             remoteJid,
             contactName,
+            onSend: ({ phone: sentPhone, text: sentText, remoteJid: sentRemoteJid, instance: sentInstance }) => {
+                logConversationEvent({
+                    direction: 'OUT',
+                    source: 'agent',
+                    tenantId,
+                    instance: sentInstance || instanceName,
+                    phone: sentPhone,
+                    remoteJid: sentRemoteJid,
+                    text: sentText,
+                });
+            },
         });
         if (result?.reply) {
             log('INFO', `Ana -> ${phone}`, { tenantId, reply: result.reply.slice(0, 200) });

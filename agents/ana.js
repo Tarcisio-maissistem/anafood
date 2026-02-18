@@ -734,7 +734,7 @@ async function sendWhatsAppMessage(phone, text, runtime, remoteJid = null) {
   return false;
 }
 
-async function runPipeline({ conversation, customer, groupedText, normalized, runtime, apiRequest, getEnvConfig, log }) {
+async function runPipeline({ conversation, customer, groupedText, normalized, runtime, apiRequest, getEnvConfig, log, onSend = null }) {
   const classification = await classifierAgent({ runtime, conversation, groupedText: normalized.normalizedText || groupedText });
   const extracted = classification.requires_extraction ? await extractorAgent({ runtime, groupedText: normalized.normalizedText || groupedText }) : {};
   log('INFO', 'Ana: classification/extraction', {
@@ -779,7 +779,15 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
         failText = `Nao encontrei esses itens no cardapio: ${order.unresolved.join(', ')}. Pode informar exatamente como aparece no cardapio?`;
         conversation.state = STATES.COLLECTING_DATA;
       }
-      await sendWhatsAppMessage(conversation.phone, failText, runtime, conversation.remoteJid);
+      const sent = await sendWhatsAppMessage(conversation.phone, failText, runtime, conversation.remoteJid);
+      if (sent && typeof onSend === 'function') {
+        onSend({
+          phone: conversation.phone,
+          remoteJid: conversation.remoteJid || null,
+          text: failText,
+          instance: runtime.evolution.instance || null,
+        });
+      }
       appendMessage(conversation, 'assistant', failText, { action: 'ORDER_CREATE_ERROR' });
       persistStateDebounced();
       return { success: true, reply: failText };
@@ -800,7 +808,15 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
 
   const reply = await generatorAgent({ runtime, conversation, classification, orchestratorResult });
   if (conversation.state !== STATES.HUMAN_HANDOFF || !conversation.handoffNotified) {
-    await sendWhatsAppMessage(conversation.phone, reply, runtime, conversation.remoteJid);
+    const sent = await sendWhatsAppMessage(conversation.phone, reply, runtime, conversation.remoteJid);
+    if (sent && typeof onSend === 'function') {
+      onSend({
+        phone: conversation.phone,
+        remoteJid: conversation.remoteJid || null,
+        text: reply,
+        instance: runtime.evolution.instance || null,
+      });
+    }
     if (conversation.state === STATES.HUMAN_HANDOFF) conversation.handoffNotified = true;
   }
 
@@ -816,7 +832,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   return { success: true, reply };
 }
 
-function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer, apiRequest, getEnvConfig, log }) {
+function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer, apiRequest, getEnvConfig, log, onSend = null }) {
   const key = conversation.id;
   let buffer = buffers.get(key);
   if (!buffer) {
@@ -859,12 +875,20 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
         originalText: normalized.originalText,
         transcription: normalized.transcription,
       });
-      await runPipeline({ conversation, customer, groupedText, normalized, runtime, apiRequest, getEnvConfig, log });
+      await runPipeline({ conversation, customer, groupedText, normalized, runtime, apiRequest, getEnvConfig, log, onSend });
     } catch (err) {
       conversation.consecutiveFailures = (conversation.consecutiveFailures || 0) + 1;
       log('ERROR', 'Ana: erro no pipeline', { err: err.message, tenantId: runtime.id, phone: conversation.phone });
       const failText = 'Tive uma falha tecnica ao processar sua mensagem. Pode tentar novamente?';
-      await sendWhatsAppMessage(conversation.phone, failText, runtime, conversation.remoteJid);
+      const sent = await sendWhatsAppMessage(conversation.phone, failText, runtime, conversation.remoteJid);
+      if (sent && typeof onSend === 'function') {
+        onSend({
+          phone: conversation.phone,
+          remoteJid: conversation.remoteJid || null,
+          text: failText,
+          instance: runtime.evolution.instance || null,
+        });
+      }
       appendMessage(conversation, 'assistant', failText, { action: 'PIPELINE_ERROR' });
       persistStateDebounced();
     } finally {
@@ -873,7 +897,7 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
   }, BUFFER_WINDOW_MS);
 }
 
-async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvConfig, log, tenant, rawMessage = null, instanceName = null, remoteJid = null, contactName = '' }) {
+async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvConfig, log, tenant, rawMessage = null, instanceName = null, remoteJid = null, contactName = '', onSend = null }) {
   const runtime = tenantRuntime(tenant, { instance: instanceName || undefined });
   const customer = getCustomer(runtime.id, phone);
   const conversation = getConversation(phone, runtime.id);
@@ -895,6 +919,7 @@ async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvCon
     apiRequest,
     getEnvConfig,
     log,
+    onSend,
   });
 
   persistStateDebounced();
