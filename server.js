@@ -958,6 +958,16 @@ app.get('/', (_req, res) => {
     return res.json(apiOverview());
 });
 
+// SPA fallback: allow direct access to frontend routes like /dashboard.
+app.get(/^\/(?!api(?:\/|$)|webhook(?:\/|$)).*/, (req, res, next) => {
+    if (path.extname(req.path)) return next();
+    const lovableIndex = path.join(__dirname, 'public', 'lovable', 'index.html');
+    if (fs.existsSync(lovableIndex)) {
+        return res.sendFile(lovableIndex);
+    }
+    return next();
+});
+
 // ─── Start ───────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
