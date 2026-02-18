@@ -47,6 +47,8 @@
     audioChunks: [],
     poller: null,
     agentSettings: { bufferWindowMs: 20000, greetingMessage: 'Olá! Como posso ajudar você hoje?' },
+    pollListBusy: false,
+    pollMessageBusy: false,
   };
 
   function syncContactPanelVisibility() {
@@ -243,12 +245,12 @@
 
     let msgData = { messages: [] };
     let sessionData = {};
-    try {
-      msgData = await fetchJson(`/api/ana/messages?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}&remoteJid=${encodeURIComponent(state.selectedRemoteJid || '')}&limit=80`);
-    } catch (_) {}
-    try {
-      sessionData = await fetchJson(`/api/ana/session?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}`);
-    } catch (_) {}
+    msgData = await fetchJson(`/api/ana/messages?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}&remoteJid=${encodeURIComponent(state.selectedRemoteJid || '')}&limit=80`);
+    if (msgData && msgData.remoteJid) {
+      state.selectedRemoteJid = msgData.remoteJid;
+      if (state.selectedConversation) state.selectedConversation.remoteJid = msgData.remoteJid;
+    }
+    sessionData = await fetchJson(`/api/ana/session?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}`);
 
     const conversationState = (sessionData && sessionData.state) || 'INIT';
     const phone = state.selectedPhone;
@@ -273,6 +275,19 @@
     }
 
     ui.messages.scrollTop = ui.messages.scrollHeight;
+  }
+
+  async function pollSelectedMessages() {
+    if (!state.selectedPhone) return;
+    if (state.pollMessageBusy) return;
+    state.pollMessageBusy = true;
+    try {
+      await loadMessages();
+    } catch (e) {
+      setStatus(`Falha ao sincronizar conversa: ${e.message}`, 'err');
+    } finally {
+      state.pollMessageBusy = false;
+    }
   }
 
   async function saveAgentSettings() {
@@ -502,8 +517,14 @@
 
       if (state.poller) clearInterval(state.poller);
       state.poller = setInterval(function () {
-        loadConversations().catch((e) => setStatus(e.message, 'err'));
-      }, 5000);
+        if (!state.pollListBusy) {
+          state.pollListBusy = true;
+          loadConversations()
+            .catch((e) => setStatus(e.message, 'err'))
+            .finally(() => { state.pollListBusy = false; });
+        }
+        pollSelectedMessages();
+      }, 3000);
     } catch (err) {
       setStatus(`Erro ao iniciar: ${err.message}`, 'err');
     }

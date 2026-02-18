@@ -1257,18 +1257,32 @@ app.get('/api/ana/messages', (req, res) => {
     }
     const limit = Math.max(1, Math.min(300, Number(req.query?.limit || 80)));
     const evo = getEvolutionConfig(tenant, req.query?.instance || null);
-    const remoteJid = requestedRemoteJid || `${phone}@s.whatsapp.net`;
+    const candidateRemoteJids = Array.from(new Set([
+        requestedRemoteJid,
+        phone ? `${phone}@s.whatsapp.net` : '',
+        phone ? `${phone}@c.us` : '',
+        phone ? `${phone}@lid` : '',
+    ].filter(Boolean)));
 
     const run = async () => {
         const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
         const resolvedInstance = pickBestEvolutionInstance(evo.instance, availableInstances);
-        const evolutionMessages = await fetchEvolutionMessages({
-            apiUrl: evo.apiUrl,
-            apiKey: evo.apiKey,
-            instance: resolvedInstance,
-            remoteJid,
-            limit,
-        });
+        let evolutionMessages = [];
+        let remoteJid = candidateRemoteJids[0] || '';
+        for (const jid of candidateRemoteJids) {
+            const fetched = await fetchEvolutionMessages({
+                apiUrl: evo.apiUrl,
+                apiKey: evo.apiKey,
+                instance: resolvedInstance,
+                remoteJid: jid,
+                limit,
+            });
+            if (fetched.length > evolutionMessages.length) {
+                evolutionMessages = fetched;
+                remoteJid = jid;
+            }
+            if (fetched.length >= limit / 2) break;
+        }
 
         const key = `${tenantId}:${phone}`;
         const session = anaSessions.get(key);
