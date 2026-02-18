@@ -168,19 +168,25 @@ function getConversation(phone, tenantId = 'default') {
       consecutiveFailures: 0,
       handoffNotified: false,
       transaction: {
-        mode: 'DELIVERY',
+        mode: '',
+        customer_name: '',
         items: [],
+        notes: '',
         address: { street_name: '', street_number: '', neighborhood: '', city: '', state: '', postal_code: '' },
         payment: '',
         total_amount: 0,
         order_id: null,
       },
+      confirmed: {},
+      pendingFieldConfirmation: null,
       greeted: false,
       messages: [],
       catalog: null,
     };
     conversations.set(key, conv);
   }
+  if (!conv.confirmed || typeof conv.confirmed !== 'object') conv.confirmed = {};
+  if (typeof conv.pendingFieldConfirmation === 'undefined') conv.pendingFieldConfirmation = null;
   conv.lastActivityAt = nowISO();
   return conv;
 }
@@ -266,9 +272,17 @@ async function extractorAgent({ runtime, groupedText }) {
   const out = {
     mode: /retirada|retirar|balcao/.test(lower) ? 'TAKEOUT' : (/entrega|delivery/.test(lower) ? 'DELIVERY' : null),
     payment: /pix/.test(lower) ? 'PIX' : (/(cartao|cartão|credito|debito)/.test(lower) ? 'CARD' : null),
+    customer_name: null,
+    notes: null,
     items: [],
     address: {},
   };
+
+  const nameMatch = groupedText.match(/(?:meu nome (?:é|e)|sou|chamo-me|me chamo)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]{2,60})/i);
+  if (nameMatch) out.customer_name = cleanText(nameMatch[1]);
+  if (/sem observa|sem complemento|sem adicional/i.test(lower)) out.notes = 'Sem observacoes';
+  const obsMatch = groupedText.match(/(?:obs|observa(?:ç|c)[aã]o|complemento)\s*[:\-]\s*(.{3,200})/i);
+  if (obsMatch) out.notes = cleanText(obsMatch[1]);
 
   const cep = groupedText.match(/\b\d{8}\b/);
   if (cep) out.address.postal_code = cep[0];
@@ -281,38 +295,122 @@ async function extractorAgent({ runtime, groupedText }) {
   return out;
 }
 
+function markFieldChanged(conv, field) {
+  conv.confirmed[field] = false;
+  if (!conv.pendingFieldConfirmation) conv.pendingFieldConfirmation = field;
+}
+
 function mergeRestaurantTransaction(conv, extracted) {
-  if (extracted.mode) conv.transaction.mode = extracted.mode;
-  if (extracted.payment) conv.transaction.payment = extracted.payment;
+  if (extracted.customer_name) {
+    const next = cleanText(extracted.customer_name);
+    if (next && next !== cleanText(conv.transaction.customer_name)) {
+      conv.transaction.customer_name = next;
+      markFieldChanged(conv, 'customer_name');
+    }
+  }
+  if (typeof extracted.notes === 'string' && extracted.notes) {
+    const next = cleanText(extracted.notes);
+    if (next && next !== cleanText(conv.transaction.notes)) {
+      conv.transaction.notes = next;
+      markFieldChanged(conv, 'notes');
+    }
+  }
+  if (extracted.mode && extracted.mode !== conv.transaction.mode) {
+    conv.transaction.mode = extracted.mode;
+    markFieldChanged(conv, 'mode');
+  }
+  if (extracted.payment && extracted.payment !== conv.transaction.payment) {
+    conv.transaction.payment = extracted.payment;
+    markFieldChanged(conv, 'payment');
+  }
 
   if (Array.isArray(extracted.items)) {
+    let changed = false;
     for (const item of extracted.items) {
       const name = cleanText(item.name || item.nome || '');
       if (!name) continue;
       const existing = conv.transaction.items.find((i) => i.name.toLowerCase() === name.toLowerCase());
-      if (existing) existing.quantity += toNumberOrOne(item.quantity);
-      else conv.transaction.items.push({ name, quantity: toNumberOrOne(item.quantity), integration_code: null, unit_price: null });
+      if (existing) {
+        const before = Number(existing.quantity || 0);
+        existing.quantity += toNumberOrOne(item.quantity);
+        if (Number(existing.quantity || 0) !== before) changed = true;
+      } else {
+        conv.transaction.items.push({ name, quantity: toNumberOrOne(item.quantity), integration_code: null, unit_price: null });
+        changed = true;
+      }
     }
+    if (changed) markFieldChanged(conv, 'items');
   }
 
   if (extracted.address && typeof extracted.address === 'object') {
-    conv.transaction.address = {
-      ...conv.transaction.address,
-      ...Object.fromEntries(Object.entries(extracted.address).map(([k, v]) => [k, cleanText(v)])),
-    };
+    for (const [k, v] of Object.entries(extracted.address)) {
+      const next = cleanText(v);
+      if (!next) continue;
+      if (cleanText(conv.transaction.address?.[k]) !== next) {
+        conv.transaction.address[k] = next;
+        markFieldChanged(conv, `address.${k}`);
+      }
+    }
   }
 }
 
-function restaurantMissingFields(runtime, tx) {
+function restaurantMissingFields(runtime, tx, confirmed = {}) {
   const missing = [];
+  if (!cleanText(tx.customer_name) || confirmed.customer_name !== true) missing.push('customer_name');
   if (!Array.isArray(tx.items) || tx.items.length === 0) missing.push('items');
+  if (Array.isArray(tx.items) && tx.items.some((i) => !Number(i.quantity) || Number(i.quantity) <= 0)) missing.push('items');
+  if (Array.isArray(tx.items) && tx.items.length > 0 && confirmed.items !== true) missing.push('items');
+  if (!cleanText(tx.notes) || confirmed.notes !== true) missing.push('notes');
+  if (!tx.mode || confirmed.mode !== true) missing.push('mode');
   if (tx.mode === 'DELIVERY' && runtime.delivery.requireAddress) {
     for (const f of ['street_name', 'street_number', 'neighborhood', 'city', 'state', 'postal_code']) {
-      if (!cleanText(tx.address?.[f])) missing.push(`address.${f}`);
+      if (!cleanText(tx.address?.[f]) || confirmed[`address.${f}`] !== true) missing.push(`address.${f}`);
     }
   }
-  if (!tx.payment) missing.push('payment');
+  if (!tx.payment || confirmed.payment !== true) missing.push('payment');
   return missing;
+}
+
+function clearTransactionField(tx, field) {
+  if (field === 'customer_name') tx.customer_name = '';
+  else if (field === 'notes') tx.notes = '';
+  else if (field === 'mode') tx.mode = '';
+  else if (field === 'payment') tx.payment = '';
+  else if (field === 'items') tx.items = [];
+  else if (field.startsWith('address.')) {
+    const addrKey = field.slice('address.'.length);
+    if (addrKey) tx.address[addrKey] = '';
+  }
+}
+
+function fieldConfirmationLabel(field) {
+  const labels = {
+    customer_name: 'nome',
+    items: 'itens do pedido',
+    notes: 'observacoes do pedido',
+    mode: 'tipo de entrega',
+    payment: 'forma de pagamento',
+    'address.street_name': 'rua',
+    'address.street_number': 'numero',
+    'address.neighborhood': 'bairro',
+    'address.city': 'cidade',
+    'address.state': 'estado',
+    'address.postal_code': 'CEP',
+  };
+  return labels[field] || field;
+}
+
+function fieldConfirmationValue(tx, field) {
+  if (field === 'customer_name') return tx.customer_name || '-';
+  if (field === 'notes') return tx.notes || '-';
+  if (field === 'mode') return tx.mode === 'TAKEOUT' ? 'retirada' : 'delivery';
+  if (field === 'payment') return tx.payment === 'PIX' ? 'PIX' : (tx.payment === 'CARD' ? 'cartao' : (tx.payment || '-'));
+  if (field === 'items') return (tx.items || []).map((i) => `${i.quantity}x ${i.name}`).join(', ') || '-';
+  if (field.startsWith('address.')) {
+    const addrKey = field.slice('address.'.length);
+    return tx.address?.[addrKey] || '-';
+  }
+  return '-';
 }
 
 function orchestrate({ runtime, conversation, classification, extracted, groupedText }) {
@@ -330,6 +428,7 @@ function orchestrate({ runtime, conversation, classification, extracted, grouped
   const i = classification.intent;
   const yes = detectYes(groupedText);
   const no = detectNo(groupedText);
+  const hasQuestion = /\?/.test(groupedText) || /\b(qual|quando|como|onde|que horas|card[aá]pio|pre[cç]o)\b/i.test(groupedText);
 
   if (runtime.segment === 'clinic') {
     if (s === STATES.INIT && i === INTENTS.NOVO_PEDIDO) return { nextState: STATES.COLLECTING_DATA, action: 'CLINIC_COLLECT', missing: ['service', 'date', 'time'] };
@@ -342,26 +441,78 @@ function orchestrate({ runtime, conversation, classification, extracted, grouped
     if (i === INTENTS.SAUDACAO) {
       const today = nowISO().slice(0, 10);
       if (runtime.greetingOncePerDay && conversation.lastGreetingDate === today) {
-        return { nextState: STATES.INIT, action: 'CLARIFY', missing: [] };
+        if (conversation.pendingFieldConfirmation) {
+          return {
+            nextState: STATES.COLLECTING_DATA,
+            action: hasQuestion ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION',
+            missing: [conversation.pendingFieldConfirmation],
+          };
+        }
+        const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed);
+        return { nextState: STATES.COLLECTING_DATA, action: 'ASK_MISSING_FIELDS', missing };
       }
       conversation.lastGreetingDate = today;
-      return { nextState: STATES.INIT, action: 'WELCOME', missing: [] };
+      const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed);
+      return { nextState: STATES.COLLECTING_DATA, action: 'WELCOME', missing };
     }
     if (i === INTENTS.NOVO_PEDIDO) {
-      const missing = restaurantMissingFields(runtime, conversation.transaction);
+      const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed);
       return missing.length ? { nextState: STATES.COLLECTING_DATA, action: 'ASK_MISSING_FIELDS', missing } : { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
     }
     if (i === INTENTS.SPAM) return { nextState: STATES.CLOSED, action: 'END_CONVERSATION', missing: [] };
-    return { nextState: STATES.INIT, action: 'CLARIFY', missing: [] };
+    if (conversation.pendingFieldConfirmation) {
+      return {
+        nextState: STATES.COLLECTING_DATA,
+        action: hasQuestion ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION',
+        missing: [conversation.pendingFieldConfirmation],
+      };
+    }
+    const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed);
+    return { nextState: STATES.COLLECTING_DATA, action: hasQuestion ? 'ANSWER_AND_RESUME' : 'ASK_MISSING_FIELDS', missing };
   }
 
   if (s === STATES.COLLECTING_DATA) {
     if (i === INTENTS.CANCELAMENTO) {
-      conversation.transaction = { mode: 'DELIVERY', items: [], address: { street_name: '', street_number: '', neighborhood: '', city: '', state: '', postal_code: '' }, payment: '', total_amount: 0, order_id: null };
+      conversation.transaction = { mode: '', customer_name: '', items: [], notes: '', address: { street_name: '', street_number: '', neighborhood: '', city: '', state: '', postal_code: '' }, payment: '', total_amount: 0, order_id: null };
+      conversation.confirmed = {};
+      conversation.pendingFieldConfirmation = null;
       return { nextState: STATES.INIT, action: 'FLOW_CANCELLED', missing: [] };
     }
-    const missing = restaurantMissingFields(runtime, conversation.transaction);
-    return missing.length ? { nextState: STATES.COLLECTING_DATA, action: 'ASK_MISSING_FIELDS', missing } : { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
+    if (conversation.pendingFieldConfirmation) {
+      const field = conversation.pendingFieldConfirmation;
+      if (yes) {
+        conversation.confirmed[field] = true;
+        conversation.pendingFieldConfirmation = null;
+      } else if (no) {
+        clearTransactionField(conversation.transaction, field);
+        conversation.confirmed[field] = false;
+        conversation.pendingFieldConfirmation = null;
+        return { nextState: STATES.COLLECTING_DATA, action: 'ASK_MISSING_FIELDS', missing: [field] };
+      } else {
+        return { nextState: STATES.COLLECTING_DATA, action: hasQuestion ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION', missing: [field] };
+      }
+    }
+
+    const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed);
+    if (missing.length && !conversation.pendingFieldConfirmation) {
+      const firstMissing = missing[0];
+      const hasValueForField = firstMissing === 'items'
+        ? Array.isArray(conversation.transaction.items) && conversation.transaction.items.length > 0
+        : firstMissing.startsWith('address.')
+          ? Boolean(cleanText(conversation.transaction.address?.[firstMissing.slice('address.'.length)]))
+          : Boolean(cleanText(conversation.transaction[firstMissing]));
+      if (hasValueForField) conversation.pendingFieldConfirmation = firstMissing;
+    }
+    if (conversation.pendingFieldConfirmation) {
+      return {
+        nextState: STATES.COLLECTING_DATA,
+        action: (i === INTENTS.CONSULTA || hasQuestion) ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION',
+        missing: [conversation.pendingFieldConfirmation],
+      };
+    }
+    return missing.length
+      ? { nextState: STATES.COLLECTING_DATA, action: (i === INTENTS.CONSULTA || hasQuestion) ? 'ANSWER_AND_RESUME' : 'ASK_MISSING_FIELDS', missing }
+      : { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
   }
 
   if (s === STATES.WAITING_CONFIRMATION) {
@@ -416,6 +567,7 @@ function resolveItemsWithCatalog(items, catalog) {
 
 async function createSaiposOrder({ conversation, runtime, apiRequest, getEnvConfig, log }) {
   if (runtime.segment !== 'restaurant') return { ok: true, skipped: true };
+  const tx = conversation.transaction || {};
 
   const { resolved, unresolved } = resolveItemsWithCatalog(conversation.transaction.items, conversation.catalog || []);
   if (unresolved.length) return { ok: false, unresolved };
@@ -433,7 +585,7 @@ async function createSaiposOrder({ conversation, runtime, apiRequest, getEnvConf
     display_id,
     cod_store: cfg.codStore,
     created_at: nowISO(),
-    notes: `Pedido WhatsApp - ${runtime.id}`,
+    notes: cleanText(tx.notes || `Pedido WhatsApp - ${runtime.id}`),
     total_amount,
     total_discount: 0,
     order_method: {
@@ -442,7 +594,7 @@ async function createSaiposOrder({ conversation, runtime, apiRequest, getEnvConf
       delivery_date_time: nowISO(),
       ...((conversation.transaction.mode || 'DELIVERY') === 'DELIVERY' ? { delivery_by: 'RESTAURANT', delivery_fee: 0 } : {}),
     },
-    customer: { id: conversation.phone, name: 'Cliente WhatsApp', phone: conversation.phone },
+    customer: { id: conversation.phone, name: cleanText(tx.customer_name || 'Cliente WhatsApp'), phone: conversation.phone },
     ...(((conversation.transaction.mode || 'DELIVERY') === 'DELIVERY') ? {
       delivery_address: {
         street_name: conversation.transaction.address.street_name || '',
@@ -503,7 +655,7 @@ async function createAnaFoodOrder({ conversation, runtime, log }) {
     ...(runtime.anafood.companyId ? { company_id: runtime.anafood.companyId } : {}),
     order: {
       ...(runtime.anafood.companyId ? { company_id: runtime.anafood.companyId } : {}),
-      customer_name: 'Cliente WhatsApp',
+      customer_name: cleanText(tx.customer_name || 'Cliente WhatsApp'),
       customer_phone: conversation.phone,
       source: 'whatsapp',
       type: toAnaFoodType(tx.mode),
@@ -517,7 +669,7 @@ async function createAnaFoodOrder({ conversation, runtime, log }) {
       items,
       delivery_fee: 0,
       total: Number((total_amount || 0) / 100),
-      observations: '',
+      observations: cleanText(tx.notes || ''),
     },
   };
 
@@ -573,10 +725,18 @@ async function createOrderByProviderIfNeeded({ conversation, runtime, apiRequest
 
 function fallbackText(runtime, action, tx, missing) {
   if (action === 'WELCOME') return `Ola! Eu sou ${runtime.agentName}. Posso ajudar com um novo pedido ou tirar duvidas.`;
+  if (action === 'ASK_FIELD_CONFIRMATION') {
+    const field = (missing || [])[0];
+    if (!field) return 'Pode confirmar esse dado?';
+    return `Confirma ${fieldConfirmationLabel(field)}: "${fieldConfirmationValue(tx, field)}"? Responda sim ou nao.`;
+  }
   if (action === 'ASK_MISSING_FIELDS') {
     const first = (missing || [])[0];
     const map = {
+      customer_name: 'Para começar, qual é o seu nome?',
       items: 'Quais itens e quantidades voce deseja?',
+      notes: 'Deseja adicionar alguma observacao ou complemento? Se nao, responda "sem observacoes".',
+      mode: 'Seu pedido é para retirada ou delivery?',
       payment: 'Qual forma de pagamento voce prefere: PIX ou cartao?',
       'address.street_name': 'Qual e o nome da rua para entrega?',
       'address.street_number': 'Qual e o numero do endereco?',
@@ -587,12 +747,20 @@ function fallbackText(runtime, action, tx, missing) {
     };
     return map[first] || 'Me passe os dados faltantes para continuar.';
   }
+  if (action === 'ANSWER_AND_RESUME') {
+    const next = fallbackText(runtime, 'ASK_MISSING_FIELDS', tx, missing);
+    return `Respondendo sua pergunta rapidamente: posso ajudar com isso. Agora, ${next.charAt(0).toLowerCase()}${next.slice(1)}`;
+  }
+  if (action === 'ANSWER_AND_RESUME_CONFIRM') {
+    const next = fallbackText(runtime, 'ASK_FIELD_CONFIRMATION', tx, missing);
+    return `Respondendo sua pergunta rapidamente: posso ajudar com isso. Agora, ${next.charAt(0).toLowerCase()}${next.slice(1)}`;
+  }
   if (action === 'ORDER_REVIEW') {
-    const items = (tx.items || []).map((i) => `${i.quantity}x ${i.name}`).join(', ');
+    const items = (tx.items || []).map((i) => `${i.quantity}x ${i.name}`).join(', ') || '-';
     const addr = tx.mode === 'DELIVERY'
       ? `${tx.address.street_name}, ${tx.address.street_number} - ${tx.address.neighborhood}, ${tx.address.city}/${tx.address.state}, CEP ${tx.address.postal_code}`
       : 'Retirada no local';
-    return `Resumo: ${items}. Entrega: ${addr}. Pagamento: ${tx.payment}. Pode confirmar?`;
+    return `Resumo do pedido:\nCliente: ${tx.customer_name || '-'}\nItens: ${items}\nObservacoes: ${tx.notes || '-'}\nTipo: ${tx.mode === 'TAKEOUT' ? 'Retirada' : 'Delivery'}\nEntrega: ${addr}\nPagamento: ${tx.payment || '-'}\nPode confirmar para eu enviar o pedido?`;
   }
   if (action === 'CREATE_ORDER_AND_WAIT_PAYMENT') return 'Pedido registrado. Agora aguardando confirmacao do pagamento PIX.';
   if (action === 'CREATE_ORDER_AND_CONFIRM' || action === 'PAYMENT_CONFIRMED') return 'Pedido confirmado com sucesso. Estamos preparando tudo.';
@@ -605,13 +773,14 @@ function fallbackText(runtime, action, tx, missing) {
   return 'Nao entendi completamente. Pode me explicar de forma objetiva?';
 }
 
-async function generatorAgent({ runtime, conversation, classification, orchestratorResult }) {
+async function generatorAgent({ runtime, conversation, classification, orchestratorResult, groupedText }) {
   const deterministic = {
     state: conversation.state,
     action: orchestratorResult.action,
     intent: classification.intent,
     missing: orchestratorResult.missing || [],
     transaction: conversation.transaction,
+    userMessage: groupedText || '',
   };
   if (!openai) {
     return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing);
@@ -620,9 +789,12 @@ async function generatorAgent({ runtime, conversation, classification, orchestra
     const c = await openai.chat.completions.create({
       model: runtime.model,
       temperature: runtime.temperature,
-      max_tokens: 220,
+      max_tokens: 260,
       messages: [
-        { role: 'system', content: `Voce e ${runtime.agentName}. Tom: ${runtime.tone}. Nao invente itens, valores, regras e nao altere estado.` },
+        {
+          role: 'system',
+          content: `Voce e ${runtime.agentName}. Tom: ${runtime.tone}. Regras: responda perguntas laterais brevemente e retome imediatamente a pergunta pendente do fluxo. Faça apenas 1 pergunta por resposta. Nao invente itens, valores ou regras. Nao finalize sem confirmacao explicita.`,
+        },
         { role: 'user', content: JSON.stringify({ deterministic, summary: conversation.contextSummary, customPrompt: runtime.customPrompt }) },
       ],
     });
@@ -848,8 +1020,18 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   }
 
   const reply = orchestratorResult.action === 'WELCOME'
-    ? runtime.greetingMessage
-    : await generatorAgent({ runtime, conversation, classification, orchestratorResult });
+    ? (() => {
+      const firstMissing = (orchestratorResult.missing || [])[0];
+      const hasPendingValue = firstMissing === 'items'
+        ? Array.isArray(conversation.transaction.items) && conversation.transaction.items.length > 0
+        : String(firstMissing || '').startsWith('address.')
+          ? Boolean(cleanText(conversation.transaction.address?.[String(firstMissing).slice('address.'.length)]))
+          : Boolean(cleanText(conversation.transaction[firstMissing]));
+      const followUpAction = hasPendingValue ? 'ASK_FIELD_CONFIRMATION' : 'ASK_MISSING_FIELDS';
+      const followUp = fallbackText(runtime, followUpAction, conversation.transaction, orchestratorResult.missing || []);
+      return followUp ? `${runtime.greetingMessage} ${followUp}`.trim() : runtime.greetingMessage;
+    })()
+    : await generatorAgent({ runtime, conversation, classification, orchestratorResult, groupedText: normalized.normalizedText || groupedText });
   if (conversation.state !== STATES.HUMAN_HANDOFF || !conversation.handoffNotified) {
     const sent = await sendWhatsAppMessage(conversation.phone, reply, runtime, conversation.remoteJid);
     if (sent && typeof onSend === 'function') {
