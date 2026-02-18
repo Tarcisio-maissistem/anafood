@@ -15,6 +15,17 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/assets', express.static(path.join(__dirname, 'public', 'lovable', 'assets')));
 
+// Avoid stale SPA bundles in production proxies/browsers.
+app.use((req, res, next) => {
+    if (req.method === 'GET' && !path.extname(req.path)) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+        res.setHeader('Surrogate-Control', 'no-store');
+    }
+    next();
+});
+
 app.get('/qz-tray.js', (_req, res) => {
     const file = path.join(__dirname, 'public', 'lovable', 'qz-tray.js');
     if (!fs.existsSync(file)) return res.sendStatus(404);
@@ -956,6 +967,27 @@ const apiOverview = () => ({
 
 app.get('/api', (_req, res) => {
     res.json(apiOverview());
+});
+
+app.get('/api/frontend-build', (_req, res) => {
+    const indexPath = path.join(__dirname, 'public', 'lovable', 'index.html');
+    if (!fs.existsSync(indexPath)) {
+        return res.status(404).json({
+            success: false,
+            error: 'Frontend index não encontrado',
+        });
+    }
+
+    const html = fs.readFileSync(indexPath, 'utf8');
+    const scriptMatch = html.match(/<script[^>]*src="([^"]+)"/i);
+    const cssMatch = html.match(/<link[^>]*href="([^"]+\.css)"/i);
+
+    return res.json({
+        success: true,
+        indexPath: 'public/lovable/index.html',
+        jsEntry: scriptMatch ? scriptMatch[1] : null,
+        cssEntry: cssMatch ? cssMatch[1] : null,
+    });
 });
 
 app.get('/', (_req, res) => {
