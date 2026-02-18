@@ -32,10 +32,17 @@ const INTENTS = {
   SPAM: 'SPAM',
 };
 
+const AGENT_DEFAULTS = {
+  bufferWindowMs: BUFFER_WINDOW_MS,
+  greetingMessage: process.env.DEFAULT_GREETING_MESSAGE || 'Olá! Como posso ajudar você hoje?',
+  greetingOncePerDay: true,
+};
+
 const customers = new Map();
 const conversations = new Map();
 const buffers = new Map();
 const processing = new Set();
+const agentSettings = new Map();
 
 const STATE_FILE = process.env.ANA_STATE_FILE
   ? path.resolve(process.env.ANA_STATE_FILE)
@@ -75,8 +82,13 @@ function loadState() {
 loadState();
 
 function tenantRuntime(tenant, runtimeOverrides = {}) {
+  const tenantId = tenant?.id || 'default';
+  const tenantCustom = tenant?.agent || {};
+  const currentSettings = agentSettings.get(tenantId) || {};
+  const bufferWindowMs = Number(currentSettings.bufferWindowMs || tenantCustom.bufferWindowMs || AGENT_DEFAULTS.bufferWindowMs);
+  const greetingMessage = cleanText(currentSettings.greetingMessage || tenantCustom.greetingMessage || AGENT_DEFAULTS.greetingMessage);
   return {
-    id: tenant?.id || 'default',
+    id: tenantId,
     name: tenant?.name || 'Tenant',
     environment: (tenant?.environment || 'homologation').toLowerCase(),
     segment: (tenant?.business?.segment || 'restaurant').toLowerCase(),
@@ -85,6 +97,9 @@ function tenantRuntime(tenant, runtimeOverrides = {}) {
     customPrompt: tenant?.agent?.customPrompt || '',
     model: tenant?.agent?.model || 'gpt-4o-mini',
     temperature: typeof tenant?.agent?.temperature === 'number' ? tenant.agent.temperature : 0.2,
+    bufferWindowMs: Number.isFinite(bufferWindowMs) ? Math.max(3000, Math.min(120000, bufferWindowMs)) : AGENT_DEFAULTS.bufferWindowMs,
+    greetingMessage: greetingMessage || AGENT_DEFAULTS.greetingMessage,
+    greetingOncePerDay: true,
     delivery: { requireAddress: tenant?.business?.restaurant?.requireAddress !== false },
     orderProvider: (tenant?.business?.restaurant?.orderProvider || 'saipos').toLowerCase(),
     anafood: {
@@ -103,6 +118,28 @@ function tenantRuntime(tenant, runtimeOverrides = {}) {
         || process.env.EVOLUTION_INSTANCE,
     },
   };
+}
+
+function getAgentSettings(tenantId = 'default') {
+  const current = agentSettings.get(tenantId) || {};
+  return {
+    tenantId,
+    bufferWindowMs: Number(current.bufferWindowMs || AGENT_DEFAULTS.bufferWindowMs),
+    greetingMessage: String(current.greetingMessage || AGENT_DEFAULTS.greetingMessage),
+    greetingOncePerDay: true,
+  };
+}
+
+function setAgentSettings(tenantId = 'default', patch = {}) {
+  const current = getAgentSettings(tenantId);
+  const next = {
+    ...current,
+    bufferWindowMs: Math.max(3000, Math.min(120000, Number(patch.bufferWindowMs || current.bufferWindowMs || AGENT_DEFAULTS.bufferWindowMs))),
+    greetingMessage: cleanText(String(patch.greetingMessage || current.greetingMessage || AGENT_DEFAULTS.greetingMessage)),
+    greetingOncePerDay: true,
+  };
+  agentSettings.set(tenantId, next);
+  return next;
 }
 
 function getCustomer(tenantId, phone) {
@@ -302,12 +339,14 @@ function orchestrate({ runtime, conversation, classification, extracted, grouped
 
   if (s === STATES.INIT) {
     if (i === INTENTS.SAUDACAO) {
-      if (conversation.greeted) return { nextState: STATES.INIT, action: 'CLARIFY', missing: [] };
-      conversation.greeted = true;
+      const today = nowISO().slice(0, 10);
+      if (runtime.greetingOncePerDay && conversation.lastGreetingDate === today) {
+        return { nextState: STATES.INIT, action: 'CLARIFY', missing: [] };
+      }
+      conversation.lastGreetingDate = today;
       return { nextState: STATES.INIT, action: 'WELCOME', missing: [] };
     }
     if (i === INTENTS.NOVO_PEDIDO) {
-      conversation.greeted = true;
       const missing = restaurantMissingFields(runtime, conversation.transaction);
       return missing.length ? { nextState: STATES.COLLECTING_DATA, action: 'ASK_MISSING_FIELDS', missing } : { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
     }
@@ -806,7 +845,9 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     }
   }
 
-  const reply = await generatorAgent({ runtime, conversation, classification, orchestratorResult });
+  const reply = orchestratorResult.action === 'WELCOME'
+    ? runtime.greetingMessage
+    : await generatorAgent({ runtime, conversation, classification, orchestratorResult });
   if (conversation.state !== STATES.HUMAN_HANDOFF || !conversation.handoffNotified) {
     const sent = await sendWhatsAppMessage(conversation.phone, reply, runtime, conversation.remoteJid);
     if (sent && typeof onSend === 'function') {
@@ -894,7 +935,7 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
     } finally {
       processing.delete(key);
     }
-  }, BUFFER_WINDOW_MS);
+  }, runtime.bufferWindowMs || BUFFER_WINDOW_MS);
 }
 
 async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvConfig, log, tenant, rawMessage = null, instanceName = null, remoteJid = null, contactName = '', onSend = null }) {
@@ -928,12 +969,14 @@ async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvCon
     queued: true,
     conversationId: conversation.id,
     state: conversation.state,
-    bufferWindowMs: BUFFER_WINDOW_MS,
+    bufferWindowMs: runtime.bufferWindowMs || BUFFER_WINDOW_MS,
   };
 }
 
 module.exports = {
   handleWhatsAppMessage,
+  getAgentSettings,
+  setAgentSettings,
   getSession: getConversation,
   sessions: conversations,
   STATES,

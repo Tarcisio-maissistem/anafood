@@ -103,6 +103,19 @@
       font-size: 12px;
       white-space: nowrap;
     }
+    .icon-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      border: 1px solid #3a4a54;
+      background: #1f2a31;
+      color: #d7e0e6;
+      cursor: pointer;
+      font-size: 16px;
+      line-height: 1;
+      display: inline-grid;
+      place-items: center;
+    }
     .actions label {
       display: inline-flex;
       align-items: center;
@@ -231,6 +244,53 @@
       padding: 18px;
       border-bottom: 1px solid var(--line);
     }
+    .danger {
+      background: #3c1e23;
+      border: 1px solid #5b2f37;
+      color: #ffd4d8;
+      border-radius: 8px;
+      padding: 10px 12px;
+      cursor: pointer;
+      font-size: 13px;
+      width: 100%;
+      text-align: left;
+    }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      width: min(560px, 94vw);
+      background: #122028;
+      border: 1px solid #2d3f4a;
+      border-radius: 12px;
+      padding: 18px;
+    }
+    .modal h3 { margin: 0 0 14px 0; font-size: 18px; }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; margin-bottom: 6px; color: #d8e0e6; font-size: 13px; }
+    .field input, .field textarea {
+      width: 100%;
+      border: 1px solid #334651;
+      border-radius: 8px;
+      background: #0f1a20;
+      color: #e9edef;
+      padding: 10px;
+      font-size: 14px;
+    }
+    .field textarea { min-height: 96px; resize: vertical; }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 8px;
+    }
     .pane h3 {
       margin: 0 0 12px 0;
       font-size: 14px;
@@ -317,6 +377,7 @@
         <div class="actions">
           <label><input id="pauseToggle" type="checkbox" /> Pausar agente</label>
           <label><input id="blockToggle" type="checkbox" /> Bloquear contato</label>
+          <button id="agentSettingsBtn" class="icon-btn" title="Configurações do agente">⚙</button>
         </div>
       </div>
       <div id="messages" class="messages"></div>
@@ -351,7 +412,27 @@
         <h3>Estado da conversa</h3>
         <div id="infoState" class="sub">-</div>
       </div>
+      <div class="pane">
+        <button id="deleteConversationBtn" class="danger">Excluir conversa inteira</button>
+      </div>
     </aside>
+  </div>
+  <div id="agentSettingsModal" class="modal-backdrop">
+    <div class="modal">
+      <h3>Configurações do agente</h3>
+      <div class="field">
+        <label for="bufferSecondsInput">Tempo de buffer (segundos)</label>
+        <input id="bufferSecondsInput" type="number" min="3" max="120" step="1" />
+      </div>
+      <div class="field">
+        <label for="greetingMessageInput">Mensagem de saudação (1x por dia)</label>
+        <textarea id="greetingMessageInput"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button id="closeAgentSettingsBtn" class="btn">Cancelar</button>
+        <button id="saveAgentSettingsBtn" class="btn primary">Salvar</button>
+      </div>
+    </div>
   </div>
   <script src="/conversas.js"></script>
 </body>

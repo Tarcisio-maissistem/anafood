@@ -5,7 +5,12 @@ const fs = require('fs');
 
 dotenv.config();
 
-const { handleWhatsAppMessage, sessions: anaSessions } = require('./agents/ana');
+const {
+    handleWhatsAppMessage,
+    getAgentSettings: getAnaAgentSettings,
+    setAgentSettings: setAnaAgentSettings,
+    sessions: anaSessions,
+} = require('./agents/ana');
 const { resolveTenant, listTenants } = require('./lib/tenants');
 
 const app = express();
@@ -661,6 +666,32 @@ const ensureEvolutionWebhook = async ({ apiUrl, apiKey, instance, webhookUrl }) 
     return { ok: false };
 };
 
+const deleteEvolutionConversation = async ({ apiUrl, apiKey, instance, remoteJid }) => {
+    if (!apiUrl || !apiKey || !instance || !remoteJid) return { ok: false, skipped: true };
+    const headers = { apikey: apiKey, Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+    const encodedJid = encodeURIComponent(remoteJid);
+    const calls = [
+        { method: 'DELETE', url: `${apiUrl}/chat/deleteChat/${instance}?remoteJid=${encodedJid}` },
+        { method: 'POST', url: `${apiUrl}/chat/deleteChat/${instance}`, body: { remoteJid } },
+        { method: 'DELETE', url: `${apiUrl}/chat/delete/${instance}?remoteJid=${encodedJid}` },
+        { method: 'POST', url: `${apiUrl}/chat/delete/${instance}`, body: { remoteJid } },
+    ];
+
+    for (const call of calls) {
+        try {
+            const response = await fetch(call.url, {
+                method: call.method,
+                headers,
+                ...(call.body ? { body: JSON.stringify(call.body) } : {}),
+            });
+            if (response.ok) return { ok: true };
+        } catch (_) {
+            // try next endpoint
+        }
+    }
+    return { ok: false };
+};
+
 const getTenantFromRequest = (req) => {
     const queryTenant = req.query?.tenant_id || req.query?.tenant;
     const headerTenant = req.get('x-tenant-id') || req.get('x-tenant');
@@ -992,6 +1023,37 @@ app.get('/api/ana/default-instance', async (req, res) => {
 });
 
 /**
+ * GET /api/ana/agent-settings
+ * Query: tenant_id (opcional)
+ */
+app.get('/api/ana/agent-settings', (req, res) => {
+    const tenant = resolveTenant({
+        tenantId: req.query?.tenant_id || req.query?.tenant || null,
+        instanceName: req.query?.instance || null,
+    });
+    const tenantId = tenant?.id || 'default';
+    const settings = getAnaAgentSettings(tenantId);
+    return res.json({ success: true, tenantId, settings });
+});
+
+/**
+ * POST /api/ana/agent-settings
+ * Body: { tenant_id?, bufferWindowMs?, greetingMessage? }
+ */
+app.post('/api/ana/agent-settings', (req, res) => {
+    const tenant = resolveTenant({
+        tenantId: req.body?.tenant_id || req.body?.tenant || null,
+        instanceName: req.body?.instance || null,
+    });
+    const tenantId = tenant?.id || 'default';
+    const settings = setAnaAgentSettings(tenantId, {
+        bufferWindowMs: req.body?.bufferWindowMs,
+        greetingMessage: req.body?.greetingMessage,
+    });
+    return res.json({ success: true, tenantId, settings });
+});
+
+/**
  * GET /api/ana/conversations
  * Lista conversas conhecidas para inbox operacional.
  * Query: tenant_id (opcional), instance (opcional), search (opcional)
@@ -1105,13 +1167,38 @@ app.get('/api/ana/conversations', (req, res) => {
             });
         }
 
-        const rows = Array.from(merged.values())
+        const rowsBase = Array.from(merged.values())
             .filter((c) => !search
                 || c.phone.includes(search)
                 || String(c?.name || '').toLowerCase().includes(search)
                 || String(c?.lastMessage?.content || '').toLowerCase().includes(search))
             .sort((a, b) => new Date(b.lastActivityAt || 0).getTime() - new Date(a.lastActivityAt || 0).getTime())
-            .slice(0, limit);
+            .slice(0, Math.max(limit * 2, limit));
+
+        // Collapse duplicate threads where same contact appears as @lid and @s.whatsapp.net.
+        const rows = [];
+        for (const row of rowsBase) {
+            const jid = String(row?.remoteJid || '').toLowerCase();
+            const isLid = jid.endsWith('@lid');
+            const nameKey = String(row?.name || '').trim().toLowerCase();
+            if (isLid && nameKey) {
+                const existing = rows.find((r) =>
+                    String(r?.name || '').trim().toLowerCase() === nameKey
+                    && !String(r?.remoteJid || '').toLowerCase().endsWith('@lid'));
+                if (existing) {
+                    if (!existing.lastActivityAt || new Date(row.lastActivityAt || 0).getTime() > new Date(existing.lastActivityAt || 0).getTime()) {
+                        existing.lastActivityAt = row.lastActivityAt || existing.lastActivityAt;
+                        existing.lastMessage = row.lastMessage || existing.lastMessage;
+                        existing.remoteJid = existing.remoteJid || row.remoteJid;
+                        existing.avatarUrl = existing.avatarUrl || row.avatarUrl;
+                    }
+                    continue;
+                }
+            }
+            rows.push(row);
+        }
+
+        const sliced = rows.slice(0, limit);
 
         return res.json({
             success: true,
@@ -1119,8 +1206,8 @@ app.get('/api/ana/conversations', (req, res) => {
             instance: resolvedInstance,
             configuredInstance: evo.instance,
             availableInstances,
-            count: rows.length,
-            conversations: rows,
+            count: sliced.length,
+            conversations: sliced,
         });
     };
 
@@ -1172,7 +1259,11 @@ app.get('/api/ana/messages', (req, res) => {
             }))
             : [];
 
-        const messages = (evolutionMessages.length ? evolutionMessages : localMessages).slice(-limit);
+        const mergedMessages = [...evolutionMessages, ...localMessages]
+            .filter((m) => m && String(m.content || '').trim())
+            .sort((a, b) => new Date(a.at || 0).getTime() - new Date(b.at || 0).getTime());
+
+        const messages = (mergedMessages.length ? mergedMessages : localMessages).slice(-limit);
         return res.json({
             success: true,
             tenantId,
@@ -1312,6 +1403,53 @@ app.post('/api/ana/send', async (req, res) => {
         }
 
         return res.json({ success: true, tenantId, phone, instance: resolvedInstance, configuredInstance: evo.instance });
+    } catch (error) {
+        handleError(res, error);
+    }
+});
+
+/**
+ * DELETE /api/ana/conversation
+ * Query: phone?, remoteJid?, tenant_id?, instance?
+ */
+app.delete('/api/ana/conversation', async (req, res) => {
+    try {
+        const tenant = resolveTenant({
+            tenantId: req.query?.tenant_id || req.query?.tenant || null,
+            instanceName: req.query?.instance || null,
+        });
+        const tenantId = tenant?.id || 'default';
+        const requestedPhone = normalizePhone(req.query?.phone || '');
+        const remoteJid = String(req.query?.remoteJid || '').trim();
+        const phone = resolveCanonicalPhone({ tenantId, phone: requestedPhone, remoteJid });
+        if (!phone && !remoteJid) {
+            return res.status(400).json({ success: false, error: 'Informe "phone" ou "remoteJid"' });
+        }
+
+        const key = `${tenantId}:${phone}`;
+        const existed = anaSessions.has(key);
+        if (existed) anaSessions.delete(key);
+
+        const evo = getEvolutionConfig(tenant, req.query?.instance || null);
+        const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
+        const resolvedInstance = pickBestEvolutionInstance(evo.instance, availableInstances);
+        const jidToDelete = remoteJid || `${phone}@s.whatsapp.net`;
+        const evolutionDelete = await deleteEvolutionConversation({
+            apiUrl: evo.apiUrl,
+            apiKey: evo.apiKey,
+            instance: resolvedInstance,
+            remoteJid: jidToDelete,
+        });
+
+        return res.json({
+            success: true,
+            tenantId,
+            phone,
+            remoteJid: jidToDelete,
+            removedFromMemory: existed,
+            evolutionDelete,
+            instance: resolvedInstance,
+        });
     } catch (error) {
         handleError(res, error);
     }
@@ -1977,8 +2115,10 @@ const apiOverview = () => ({
         anaConversations:'GET  /api/ana/conversations',
         anaMessages:     'GET  /api/ana/messages',
         anaDefaultInst:  'GET  /api/ana/default-instance',
+        anaAgentSettings:'GET/POST /api/ana/agent-settings',
         anaContactCtrl:  'GET/POST /api/ana/contact-control',
         anaSend:         'POST /api/ana/send',
+        anaDeleteConv:   'DELETE /api/ana/conversation',
         conversasUI:     'GET  /conversas',
         totemUI:         'GET  /totem.html',
         lovableUI:       'GET  /lovable/',

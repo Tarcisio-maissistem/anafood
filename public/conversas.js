@@ -12,6 +12,7 @@
     contactState: document.getElementById('contactState'),
     pauseToggle: document.getElementById('pauseToggle'),
     blockToggle: document.getElementById('blockToggle'),
+    agentSettingsBtn: document.getElementById('agentSettingsBtn'),
     messages: document.getElementById('messages'),
     textInput: document.getElementById('textInput'),
     sendBtn: document.getElementById('sendBtn'),
@@ -25,6 +26,12 @@
     infoInstance: document.getElementById('infoInstance'),
     infoState: document.getElementById('infoState'),
     rightStatus: document.getElementById('rightStatus'),
+    deleteConversationBtn: document.getElementById('deleteConversationBtn'),
+    agentSettingsModal: document.getElementById('agentSettingsModal'),
+    bufferSecondsInput: document.getElementById('bufferSecondsInput'),
+    greetingMessageInput: document.getElementById('greetingMessageInput'),
+    closeAgentSettingsBtn: document.getElementById('closeAgentSettingsBtn'),
+    saveAgentSettingsBtn: document.getElementById('saveAgentSettingsBtn'),
   };
 
   const state = {
@@ -38,6 +45,7 @@
     recorder: null,
     audioChunks: [],
     poller: null,
+    agentSettings: { bufferWindowMs: 20000, greetingMessage: 'Olá! Como posso ajudar você hoje?' },
   };
 
   function syncContactPanelVisibility() {
@@ -112,6 +120,23 @@
     ui.infoInstance.textContent = state.instance || '-';
   }
 
+  async function loadAgentSettings() {
+    try {
+      const data = await fetchJson(`/api/ana/agent-settings?tenant_id=${encodeURIComponent(state.tenantId)}`);
+      if (data && data.settings) state.agentSettings = data.settings;
+    } catch (_) {}
+  }
+
+  function openAgentSettingsModal() {
+    ui.bufferSecondsInput.value = Math.max(3, Math.round(Number(state.agentSettings.bufferWindowMs || 20000) / 1000));
+    ui.greetingMessageInput.value = String(state.agentSettings.greetingMessage || '');
+    ui.agentSettingsModal.classList.add('open');
+  }
+
+  function closeAgentSettingsModal() {
+    ui.agentSettingsModal.classList.remove('open');
+  }
+
   function renderList() {
     syncContactPanelVisibility();
     ui.list.innerHTML = '';
@@ -183,6 +208,7 @@
       ui.blockToggle.checked = false;
       ui.pauseToggle.disabled = true;
       ui.blockToggle.disabled = true;
+      ui.deleteConversationBtn.disabled = true;
       state.contactInfoOpen = false;
       syncContactPanelVisibility();
     }
@@ -224,6 +250,7 @@
     ui.contactState.textContent = `Estado: ${conversationState} | Instância: ${state.instance || '-'}`;
     ui.pauseToggle.disabled = false;
     ui.blockToggle.disabled = false;
+    ui.deleteConversationBtn.disabled = false;
     ui.infoPhone.textContent = phone;
     ui.infoInstance.textContent = state.instance || '-';
     ui.infoState.textContent = conversationState;
@@ -241,6 +268,42 @@
     }
 
     ui.messages.scrollTop = ui.messages.scrollHeight;
+  }
+
+  async function saveAgentSettings() {
+    const bufferSeconds = Number(ui.bufferSecondsInput.value || 20);
+    const greetingMessage = String(ui.greetingMessageInput.value || '').trim();
+    const body = {
+      tenant_id: state.tenantId,
+      bufferWindowMs: Math.max(3, Math.min(120, bufferSeconds)) * 1000,
+      greetingMessage,
+    };
+    const data = await fetchJson('/api/ana/agent-settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (data && data.settings) state.agentSettings = data.settings;
+    setStatus('Configurações do agente salvas.', 'ok');
+    closeAgentSettingsModal();
+  }
+
+  async function deleteConversation() {
+    if (!state.selectedPhone && !state.selectedRemoteJid) return;
+    const target = state.selectedConversation ? displayName(state.selectedConversation) : state.selectedPhone;
+    const ok = window.confirm(`Excluir a conversa inteira de "${target}"? Esta ação não pode ser desfeita.`);
+    if (!ok) return;
+
+    await fetchJson(`/api/ana/conversation?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance || '')}&phone=${encodeURIComponent(state.selectedPhone || '')}&remoteJid=${encodeURIComponent(state.selectedRemoteJid || '')}`, {
+      method: 'DELETE',
+    });
+
+    setStatus('Conversa excluída com sucesso.', 'ok');
+    state.selectedPhone = '';
+    state.selectedRemoteJid = '';
+    state.selectedConversation = null;
+    state.contactInfoOpen = false;
+    await loadConversations();
   }
 
   async function updateControl(patch) {
@@ -374,6 +437,22 @@
     syncContactPanelVisibility();
   };
 
+  ui.agentSettingsBtn.onclick = function () {
+    openAgentSettingsModal();
+  };
+
+  ui.closeAgentSettingsBtn.onclick = function () {
+    closeAgentSettingsModal();
+  };
+
+  ui.saveAgentSettingsBtn.onclick = function () {
+    saveAgentSettings().catch((e) => setStatus(e.message, 'err'));
+  };
+
+  ui.agentSettingsModal.onclick = function (e) {
+    if (e.target === ui.agentSettingsModal) closeAgentSettingsModal();
+  };
+
   ui.pauseToggle.onchange = function () {
     updateControl({ paused: ui.pauseToggle.checked }).catch((e) => setStatus(e.message, 'err'));
   };
@@ -404,9 +483,14 @@
     toggleRecording().catch((e) => setStatus(e.message, 'err'));
   };
 
+  ui.deleteConversationBtn.onclick = function () {
+    deleteConversation().catch((e) => setStatus(e.message, 'err'));
+  };
+
   async function boot() {
     try {
       await loadDefaultInstance();
+      await loadAgentSettings();
       await loadConversations();
       setStatus('Inbox pronta. Carregadas as últimas 50 conversas.', 'ok');
 
