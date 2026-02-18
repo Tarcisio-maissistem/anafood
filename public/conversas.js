@@ -1,158 +1,167 @@
-/* global MediaRecorder */
 (function () {
-  const qs = (id) => document.getElementById(id);
+  const ui = {
+    instanceInfo: document.getElementById('instanceInfo'),
+    refreshBtn: document.getElementById('refreshBtn'),
+    searchInput: document.getElementById('searchInput'),
+    list: document.getElementById('list'),
+    contactAvatar: document.getElementById('contactAvatar'),
+    contactName: document.getElementById('contactName'),
+    contactState: document.getElementById('contactState'),
+    pauseToggle: document.getElementById('pauseToggle'),
+    blockToggle: document.getElementById('blockToggle'),
+    messages: document.getElementById('messages'),
+    textInput: document.getElementById('textInput'),
+    sendBtn: document.getElementById('sendBtn'),
+    attachBtn: document.getElementById('attachBtn'),
+    recordBtn: document.getElementById('recordBtn'),
+    fileInput: document.getElementById('fileInput'),
+    status: document.getElementById('status'),
+  };
+
   const state = {
-    selectedPhone: null,
+    tenantId: 'default',
+    instance: '',
+    selectedPhone: '',
+    selectedRemoteJid: '',
     conversations: [],
     recorder: null,
     audioChunks: [],
-    polling: null,
+    poller: null,
   };
 
-  const ui = {
-    tenantId: qs('tenantId'),
-    instanceName: qs('instanceName'),
-    refreshBtn: qs('refreshBtn'),
-    searchInput: qs('searchInput'),
-    chatList: qs('chatList'),
-    contactTitle: qs('contactTitle'),
-    contactMeta: qs('contactMeta'),
-    pauseToggle: qs('pauseToggle'),
-    blockToggle: qs('blockToggle'),
-    messages: qs('messages'),
-    textInput: qs('textInput'),
-    fileInput: qs('fileInput'),
-    attachBtn: qs('attachBtn'),
-    recordBtn: qs('recordBtn'),
-    sendBtn: qs('sendBtn'),
-    statusBar: qs('statusBar'),
-  };
-
-  function tenant() {
-    return (ui.tenantId.value || 'default').trim();
+  function setStatus(text, cls) {
+    ui.status.textContent = text;
+    ui.status.className = `status ${cls || ''}`;
   }
 
-  function instance() {
-    return (ui.instanceName.value || '').trim();
+  function normalizePhone(value) {
+    return String(value || '').replace(/\D/g, '');
   }
 
-  function setStatus(text, type) {
-    ui.statusBar.textContent = text;
-    ui.statusBar.className = `hint ${type || ''}`;
+  function formatTime(iso) {
+    if (!iso) return '';
+    const dt = new Date(iso);
+    if (Number.isNaN(dt.getTime())) return '';
+    return dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
   }
 
   async function fetchJson(url, init) {
     const response = await fetch(url, init);
     const data = await response.json().catch(() => ({}));
-    if (!response.ok || data.success === false) {
-      throw new Error(data.error || `HTTP ${response.status}`);
-    }
+    if (!response.ok || data.success === false) throw new Error(data.error || `HTTP ${response.status}`);
     return data;
+  }
+
+  async function loadDefaultInstance() {
+    try {
+      const data = await fetchJson('/api/tenants');
+      const current = Array.isArray(data.tenants) ? data.tenants.find((t) => t.id === data.tenants?.[0]?.id) : null;
+      state.tenantId = current?.id || 'default';
+      state.instance = current?.evolution?.instance || '';
+    } catch (_) {
+      state.tenantId = 'default';
+      state.instance = '';
+    }
+    ui.instanceInfo.textContent = `Instância padrão: ${state.instance || '(não definida)'}`;
+  }
+
+  function renderList() {
+    ui.list.innerHTML = '';
+    for (const c of state.conversations) {
+      const item = document.createElement('div');
+      item.className = `item ${state.selectedPhone === c.phone ? 'active' : ''}`;
+      const initials = c.phone.slice(-2) || '--';
+      const preview = (c.lastMessage?.content || 'Sem mensagens').replace(/[<>&]/g, '');
+      item.innerHTML = `
+        <div class="bubble-avatar">${initials}</div>
+        <div>
+          <div class="name">${c.phone}</div>
+          <div class="preview">${preview}</div>
+        </div>
+        <div class="time">${formatTime(c.lastActivityAt)}</div>
+      `;
+      item.onclick = async function () {
+        state.selectedPhone = c.phone;
+        state.selectedRemoteJid = c.remoteJid || `${c.phone}@s.whatsapp.net`;
+        renderList();
+        await loadControls();
+        await loadMessages();
+      };
+      ui.list.appendChild(item);
+    }
   }
 
   async function loadConversations() {
     const search = encodeURIComponent((ui.searchInput.value || '').trim());
-    const url = `/api/ana/conversations?tenant_id=${encodeURIComponent(tenant())}&instance=${encodeURIComponent(instance())}&search=${search}`;
-    const data = await fetchJson(url);
+    const data = await fetchJson(`/api/ana/conversations?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&limit=50&search=${search}`);
     state.conversations = data.conversations || [];
-    renderConversationList();
-
+    if (!state.selectedPhone && state.conversations.length) {
+      state.selectedPhone = state.conversations[0].phone;
+      state.selectedRemoteJid = state.conversations[0].remoteJid || `${state.selectedPhone}@s.whatsapp.net`;
+    }
+    renderList();
     if (state.selectedPhone) {
-      const exists = state.conversations.find((c) => c.phone === state.selectedPhone);
-      if (exists) {
-        await loadSelectedConversation();
-      } else {
-        state.selectedPhone = null;
-        renderConversationDetails(null);
-      }
+      await loadControls();
+      await loadMessages();
     }
   }
 
-  function renderConversationList() {
-    ui.chatList.innerHTML = '';
-    for (const c of state.conversations) {
-      const div = document.createElement('div');
-      div.className = `chat-item ${state.selectedPhone === c.phone ? 'active' : ''}`;
-      const last = c.lastMessage ? `${c.lastMessage.role === 'assistant' ? 'Ana: ' : ''}${c.lastMessage.content}` : 'Sem mensagens';
-      div.innerHTML = `
-        <div class="name">${c.phone}</div>
-        <div class="meta">Estado: ${c.state} ${c.paused ? '| pausado' : ''} ${c.blocked ? '| bloqueado' : ''}</div>
-        <div class="preview">${last}</div>
-      `;
-      div.onclick = async function () {
-        state.selectedPhone = c.phone;
-        renderConversationList();
-        await loadSelectedConversation();
-      };
-      ui.chatList.appendChild(div);
-    }
-  }
-
-  async function loadSelectedConversation() {
+  async function loadControls() {
     if (!state.selectedPhone) return;
-    const sessionUrl = `/api/ana/session?phone=${encodeURIComponent(state.selectedPhone)}&tenant_id=${encodeURIComponent(tenant())}&instance=${encodeURIComponent(instance())}`;
-    const ctrlUrl = `/api/ana/contact-control?phone=${encodeURIComponent(state.selectedPhone)}&tenant_id=${encodeURIComponent(tenant())}&instance=${encodeURIComponent(instance())}`;
-    const [session, control] = await Promise.all([fetchJson(sessionUrl), fetchJson(ctrlUrl)]);
-    renderConversationDetails({ session, control });
+    const c = await fetchJson(`/api/ana/contact-control?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}`);
+    ui.pauseToggle.checked = !!c.control?.paused;
+    ui.blockToggle.checked = !!c.control?.blocked;
   }
 
-  function renderConversationDetails(payload) {
-    if (!payload || !payload.session || !payload.session.found) {
-      ui.contactTitle.textContent = state.selectedPhone ? state.selectedPhone : 'Selecione uma conversa';
-      ui.contactMeta.textContent = 'Sem sessao ativa para este contato.';
-      ui.messages.innerHTML = '';
-      ui.pauseToggle.checked = false;
-      ui.blockToggle.checked = false;
-      return;
-    }
+  async function loadMessages() {
+    if (!state.selectedPhone) return;
+    const msgData = await fetchJson(`/api/ana/messages?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}&limit=80`);
+    const sessionData = await fetchJson(`/api/ana/session?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}`);
 
-    const session = payload.session;
-    const control = payload.control?.control || { paused: false, blocked: false };
-    ui.contactTitle.textContent = session.phone;
-    ui.contactMeta.textContent = `Estado: ${session.state} | Mensagens: ${session.messageCount} | Ultima atividade: ${session.lastActivityAt || '-'}`;
-    ui.pauseToggle.checked = !!control.paused;
-    ui.blockToggle.checked = !!control.blocked;
+    ui.contactAvatar.textContent = state.selectedPhone.slice(-2) || '--';
+    ui.contactName.textContent = state.selectedPhone;
+    ui.contactState.textContent = `Estado: ${sessionData?.state || 'INIT'} | Instância: ${state.instance || '-'}`;
 
+    const messages = msgData.messages || [];
     ui.messages.innerHTML = '';
-    const messages = Array.isArray(session.recentMessages) ? session.recentMessages : [];
-    for (const msg of messages) {
-      const bubble = document.createElement('div');
-      bubble.className = `bubble ${msg.role === 'assistant' ? 'bot' : 'user'}`;
-      const safe = String(msg.content || '').replace(/[<>&]/g, '');
-      bubble.innerHTML = `<div>${safe}</div><div class="at">${msg.at || ''}</div>`;
-      ui.messages.appendChild(bubble);
+    for (const m of messages) {
+      const role = m.role === 'assistant' ? 'assistant' : 'user';
+      const safe = String(m.content || '').replace(/[<>&]/g, '');
+      const el = document.createElement('div');
+      el.className = `msg ${role}`;
+      el.innerHTML = `<div class="content">${safe}<div class="at">${formatTime(m.at)}</div></div>`;
+      ui.messages.appendChild(el);
     }
     ui.messages.scrollTop = ui.messages.scrollHeight;
   }
 
-  async function setControl(patch) {
+  async function updateControl(patch) {
     if (!state.selectedPhone) return;
-    const data = await fetchJson('/api/ana/contact-control', {
+    await fetchJson('/api/ana/contact-control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        tenant_id: state.tenantId,
+        instance: state.instance || null,
         phone: state.selectedPhone,
-        tenant_id: tenant(),
-        instance: instance() || null,
         ...patch,
       }),
     });
-    setStatus(`Controle atualizado: pausado=${data.control.paused}, bloqueado=${data.control.blocked}`, 'ok');
-    await loadConversations();
+    setStatus('Controle atualizado.', 'ok');
   }
 
   async function sendText() {
-    if (!state.selectedPhone) return setStatus('Selecione uma conversa primeiro.', 'warn');
+    if (!state.selectedPhone) return setStatus('Selecione uma conversa.', 'warn');
     const text = (ui.textInput.value || '').trim();
     if (!text) return;
     await fetchJson('/api/ana/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        tenant_id: state.tenantId,
+        instance: state.instance || null,
         phone: state.selectedPhone,
         text,
-        tenant_id: tenant(),
-        instance: instance() || null,
       }),
     });
     ui.textInput.value = '';
@@ -162,77 +171,69 @@
 
   function fileToBase64(file) {
     return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = function () {
-        const dataUrl = String(reader.result || '');
-        const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
-        resolve(base64);
+      const fr = new FileReader();
+      fr.onload = function () {
+        const dataUrl = String(fr.result || '');
+        resolve(dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl);
       };
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
+      fr.onerror = reject;
+      fr.readAsDataURL(file);
     });
   }
 
   async function sendFile(file) {
-    if (!state.selectedPhone) return setStatus('Selecione uma conversa primeiro.', 'warn');
+    if (!state.selectedPhone) return setStatus('Selecione uma conversa.', 'warn');
     const base64 = await fileToBase64(file);
     await fetchJson('/api/ana/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        tenant_id: state.tenantId,
+        instance: state.instance || null,
         phone: state.selectedPhone,
         mediaBase64: base64,
         mimeType: file.type || 'application/octet-stream',
         fileName: file.name || 'arquivo.bin',
-        caption: ui.textInput.value || '',
-        tenant_id: tenant(),
-        instance: instance() || null,
+        caption: (ui.textInput.value || '').trim(),
       }),
     });
-    setStatus('Arquivo/midia enviado.', 'ok');
+    setStatus('Arquivo/mídia enviado.', 'ok');
     await loadConversations();
   }
 
   async function toggleRecording() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      return setStatus('Gravacao de audio nao suportada neste navegador.', 'err');
-    }
+    if (!navigator.mediaDevices?.getUserMedia) return setStatus('Gravação não suportada.', 'err');
     if (state.recorder && state.recorder.state === 'recording') {
       state.recorder.stop();
       return;
     }
-
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     state.audioChunks = [];
-    const recorder = new MediaRecorder(stream);
-    state.recorder = recorder;
-    recorder.ondataavailable = function (evt) {
+    state.recorder = new MediaRecorder(stream);
+    state.recorder.ondataavailable = function (evt) {
       if (evt.data && evt.data.size > 0) state.audioChunks.push(evt.data);
     };
-    recorder.onstop = async function () {
+    state.recorder.onstop = async function () {
       try {
         ui.recordBtn.textContent = 'Gravar';
-        const blob = new Blob(state.audioChunks, { type: recorder.mimeType || 'audio/webm' });
+        const blob = new Blob(state.audioChunks, { type: state.recorder.mimeType || 'audio/webm' });
         const file = new File([blob], `audio-${Date.now()}.webm`, { type: blob.type || 'audio/webm' });
         await sendFile(file);
       } catch (err) {
-        setStatus(`Erro ao enviar audio: ${err.message}`, 'err');
+        setStatus(`Falha no envio de áudio: ${err.message}`, 'err');
       } finally {
         stream.getTracks().forEach((t) => t.stop());
       }
     };
-    recorder.start();
+    state.recorder.start();
     ui.recordBtn.textContent = 'Parar';
-    setStatus('Gravando audio... clique novamente para parar.', 'warn');
+    setStatus('Gravando áudio... clique novamente para parar.', 'warn');
   }
 
-  ui.refreshBtn.onclick = async function () {
-    await loadConversations();
-    setStatus('Inbox atualizada.', 'ok');
-  };
+  ui.refreshBtn.onclick = function () { loadConversations().then(() => setStatus('Atualizado.', 'ok')).catch((e) => setStatus(e.message, 'err')); };
   ui.searchInput.oninput = function () { loadConversations().catch((e) => setStatus(e.message, 'err')); };
-  ui.pauseToggle.onchange = function () { setControl({ paused: ui.pauseToggle.checked }).catch((e) => setStatus(e.message, 'err')); };
-  ui.blockToggle.onchange = function () { setControl({ blocked: ui.blockToggle.checked }).catch((e) => setStatus(e.message, 'err')); };
+  ui.pauseToggle.onchange = function () { updateControl({ paused: ui.pauseToggle.checked }).catch((e) => setStatus(e.message, 'err')); };
+  ui.blockToggle.onchange = function () { updateControl({ blocked: ui.blockToggle.checked }).catch((e) => setStatus(e.message, 'err')); };
   ui.sendBtn.onclick = function () { sendText().catch((e) => setStatus(e.message, 'err')); };
   ui.attachBtn.onclick = function () { ui.fileInput.click(); };
   ui.fileInput.onchange = function () {
@@ -244,14 +245,15 @@
 
   async function boot() {
     try {
+      await loadDefaultInstance();
       await loadConversations();
-      if (state.polling) clearInterval(state.polling);
-      state.polling = setInterval(() => {
+      setStatus('Inbox pronta. Carregadas as últimas 50 conversas.', 'ok');
+      if (state.poller) clearInterval(state.poller);
+      state.poller = setInterval(function () {
         loadConversations().catch((e) => setStatus(e.message, 'err'));
       }, 5000);
-      setStatus('Inbox online. Atualizando a cada 5 segundos.', 'ok');
     } catch (err) {
-      setStatus(`Falha ao carregar inbox: ${err.message}`, 'err');
+      setStatus(`Erro ao iniciar: ${err.message}`, 'err');
     }
   }
 

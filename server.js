@@ -297,6 +297,117 @@ const sendEvolutionMedia = async ({ apiUrl, apiKey, instance, phone, base64, mim
     return { ok: false, error: lastError || 'Falha desconhecida no envio de midia' };
 };
 
+const toArrayPayload = (payload) => {
+    if (Array.isArray(payload)) return payload;
+    if (Array.isArray(payload?.data)) return payload.data;
+    if (Array.isArray(payload?.result)) return payload.result;
+    if (Array.isArray(payload?.chats)) return payload.chats;
+    if (Array.isArray(payload?.messages)) return payload.messages;
+    if (Array.isArray(payload?.records)) return payload.records;
+    return [];
+};
+
+const extractTextFromAnyMessage = (msg) => {
+    const m = msg?.message || msg?.data?.message || msg || {};
+    return (
+        m?.conversation ||
+        m?.extendedTextMessage?.text ||
+        m?.imageMessage?.caption ||
+        m?.videoMessage?.caption ||
+        m?.documentMessage?.caption ||
+        m?.buttonsResponseMessage?.selectedDisplayText ||
+        m?.templateButtonReplyMessage?.selectedDisplayText ||
+        m?.listResponseMessage?.title ||
+        m?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+        msg?.text ||
+        ''
+    );
+};
+
+const fetchEvolutionChats = async ({ apiUrl, apiKey, instance, limit = 50 }) => {
+    if (!apiUrl || !apiKey || !instance) return [];
+    const endpoints = [
+        `${apiUrl}/chat/findChats/${instance}?page=1&limit=${limit}`,
+        `${apiUrl}/chat/findChats/${instance}?limit=${limit}`,
+        `${apiUrl}/chat/findChats/${instance}`,
+        `${apiUrl}/chat/fetchChats/${instance}?page=1&limit=${limit}`,
+        `${apiUrl}/chat/fetchChats/${instance}`,
+    ];
+
+    for (const endpoint of endpoints) {
+        try {
+            const response = await fetch(endpoint, {
+                method: 'GET',
+                headers: { apikey: apiKey, Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+            });
+            if (!response.ok) continue;
+            const payload = await response.json().catch(() => ({}));
+            const chats = toArrayPayload(payload);
+            if (!chats.length) continue;
+
+            return chats.slice(0, limit).map((chat) => {
+                const remoteJid = chat?.id || chat?.remoteJid || chat?.jid || chat?.key?.remoteJid || '';
+                const phone = String(remoteJid).split('@')[0].replace(/\D/g, '');
+                const lastMessageText = extractTextFromAnyMessage(chat?.lastMessage || chat?.message || chat);
+                const ts = chat?.conversationTimestamp || chat?.timestamp || chat?.t || chat?.lastMessageTimestamp || null;
+                const at = ts ? new Date(Number(ts) > 9999999999 ? Number(ts) : Number(ts) * 1000).toISOString() : null;
+                return {
+                    phone,
+                    remoteJid: remoteJid || (phone ? `${phone}@s.whatsapp.net` : ''),
+                    lastMessage: { role: 'user', content: String(lastMessageText || '').slice(0, 280), at },
+                    lastActivityAt: at,
+                };
+            }).filter((c) => c.phone);
+        } catch (_) {
+            // try next endpoint
+        }
+    }
+    return [];
+};
+
+const fetchEvolutionMessages = async ({ apiUrl, apiKey, instance, remoteJid, limit = 80 }) => {
+    if (!apiUrl || !apiKey || !instance || !remoteJid) return [];
+    const encodedJid = encodeURIComponent(remoteJid);
+    const endpoints = [
+        `${apiUrl}/chat/findMessages/${instance}/${encodedJid}?page=1&limit=${limit}`,
+        `${apiUrl}/chat/findMessages/${instance}/${encodedJid}`,
+        `${apiUrl}/chat/findMessages/${instance}?remoteJid=${encodedJid}&page=1&limit=${limit}`,
+        `${apiUrl}/chat/findMessages/${instance}?remoteJid=${encodedJid}`,
+    ];
+
+    for (const endpoint of endpoints) {
+        try {
+            const response = await fetch(endpoint, {
+                method: 'GET',
+                headers: { apikey: apiKey, Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+            });
+            if (!response.ok) continue;
+            const payload = await response.json().catch(() => ({}));
+            const rows = toArrayPayload(payload);
+            if (!rows.length) continue;
+
+            const mapped = rows.map((row) => {
+                const key = row?.key || row?.data?.key || {};
+                const fromMe = Boolean(key?.fromMe ?? row?.fromMe ?? false);
+                const text = extractTextFromAnyMessage(row);
+                const ts = row?.messageTimestamp || row?.timestamp || row?.data?.messageTimestamp || null;
+                const at = ts ? new Date(Number(ts) > 9999999999 ? Number(ts) : Number(ts) * 1000).toISOString() : null;
+                return {
+                    role: fromMe ? 'assistant' : 'user',
+                    content: String(text || '').slice(0, 2000),
+                    at,
+                };
+            }).filter((m) => m.content);
+
+            return mapped.slice(-limit);
+        } catch (_) {
+            // try next endpoint
+        }
+    }
+
+    return [];
+};
+
 const getTenantFromRequest = (req) => {
     const queryTenant = req.query?.tenant_id || req.query?.tenant;
     const headerTenant = req.get('x-tenant-id') || req.get('x-tenant');
@@ -587,8 +698,10 @@ app.get('/api/ana/conversations', (req, res) => {
     });
     const tenantId = tenant?.id || 'default';
     const search = String(req.query?.search || '').trim().toLowerCase();
+    const limit = Math.max(1, Math.min(200, Number(req.query?.limit || 50)));
+    const evo = getEvolutionConfig(tenant, req.query?.instance || null);
 
-    const rows = Array.from(anaSessions.entries())
+    const inMemoryRows = Array.from(anaSessions.entries())
         .map(([key, session]) => ({ key, session }))
         .filter(({ session }) => String(session?.tenantId || 'default') === tenantId)
         .map(({ session }) => {
@@ -609,11 +722,109 @@ app.get('/api/ana/conversations', (req, res) => {
                 paused: control.paused,
                 blocked: control.blocked,
             };
-        })
-        .filter((c) => !search || c.phone.includes(search) || String(c?.lastMessage?.content || '').toLowerCase().includes(search))
-        .sort((a, b) => new Date(b.lastActivityAt || 0).getTime() - new Date(a.lastActivityAt || 0).getTime());
+        });
 
-    return res.json({ success: true, tenantId, count: rows.length, conversations: rows });
+    const buildResponse = async () => {
+        const evolutionRows = await fetchEvolutionChats({
+            apiUrl: evo.apiUrl,
+            apiKey: evo.apiKey,
+            instance: evo.instance,
+            limit,
+        });
+
+        const merged = new Map();
+        for (const row of evolutionRows) {
+            if (!row?.phone) continue;
+            const control = getContactControl(tenantId, row.phone);
+            merged.set(row.phone, {
+                phone: row.phone,
+                remoteJid: row.remoteJid || `${row.phone}@s.whatsapp.net`,
+                state: 'INIT',
+                messageCount: 0,
+                lastActivityAt: row.lastActivityAt || null,
+                lastMessage: row.lastMessage || null,
+                paused: control.paused,
+                blocked: control.blocked,
+            });
+        }
+
+        for (const row of inMemoryRows) {
+            if (!row?.phone) continue;
+            const current = merged.get(row.phone) || {};
+            merged.set(row.phone, {
+                ...current,
+                ...row,
+                remoteJid: current.remoteJid || `${row.phone}@s.whatsapp.net`,
+                lastActivityAt: row.lastActivityAt || current.lastActivityAt || null,
+                lastMessage: row.lastMessage || current.lastMessage || null,
+            });
+        }
+
+        const rows = Array.from(merged.values())
+            .filter((c) => !search || c.phone.includes(search) || String(c?.lastMessage?.content || '').toLowerCase().includes(search))
+            .sort((a, b) => new Date(b.lastActivityAt || 0).getTime() - new Date(a.lastActivityAt || 0).getTime())
+            .slice(0, limit);
+
+        return res.json({
+            success: true,
+            tenantId,
+            instance: evo.instance,
+            count: rows.length,
+            conversations: rows,
+        });
+    };
+
+    buildResponse().catch((error) => handleError(res, error));
+});
+
+/**
+ * GET /api/ana/messages
+ * Query: phone (obrigatorio), tenant_id?, instance?, limit?
+ */
+app.get('/api/ana/messages', (req, res) => {
+    const phone = normalizePhone(req.query?.phone || '');
+    if (!phone) return res.status(400).json({ success: false, error: 'Parametro "phone" e obrigatorio' });
+
+    const tenant = resolveTenant({
+        tenantId: req.query?.tenant_id || req.query?.tenant || null,
+        instanceName: req.query?.instance || null,
+    });
+    const tenantId = tenant?.id || 'default';
+    const limit = Math.max(1, Math.min(300, Number(req.query?.limit || 80)));
+    const evo = getEvolutionConfig(tenant, req.query?.instance || null);
+    const remoteJid = `${phone}@s.whatsapp.net`;
+
+    const run = async () => {
+        const evolutionMessages = await fetchEvolutionMessages({
+            apiUrl: evo.apiUrl,
+            apiKey: evo.apiKey,
+            instance: evo.instance,
+            remoteJid,
+            limit,
+        });
+
+        const key = `${tenantId}:${phone}`;
+        const session = anaSessions.get(key);
+        const localMessages = Array.isArray(session?.messages)
+            ? session.messages.map((m) => ({
+                role: m.role || 'user',
+                content: String(m.content || ''),
+                at: m.at || null,
+            }))
+            : [];
+
+        const messages = (evolutionMessages.length ? evolutionMessages : localMessages).slice(-limit);
+        return res.json({
+            success: true,
+            tenantId,
+            instance: evo.instance,
+            phone,
+            remoteJid,
+            count: messages.length,
+            messages,
+        });
+    };
+    run().catch((error) => handleError(res, error));
 });
 
 /**
@@ -1347,6 +1558,7 @@ const apiOverview = () => ({
         webhookPix:      'POST /webhook/pix',
         webhookWhatsApp: 'POST /webhook/whatsapp',
         anaConversations:'GET  /api/ana/conversations',
+        anaMessages:     'GET  /api/ana/messages',
         anaContactCtrl:  'GET/POST /api/ana/contact-control',
         anaSend:         'POST /api/ana/send',
         conversasUI:     'GET  /conversas',

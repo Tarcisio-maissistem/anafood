@@ -3,98 +3,114 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Conversas | AnaFood</title>
+  <title>Conversas</title>
   <style>
     :root {
-      --bg: #0b141a;
-      --panel: #111b21;
-      --panel-soft: #202c33;
+      --app-bg: #0a1014;
+      --panel-left: #111b21;
+      --panel-right: #0b141a;
+      --header: #202c33;
       --line: #2a3942;
       --text: #e9edef;
       --muted: #8696a0;
       --accent: #00a884;
-      --accent-soft: #103529;
-      --danger: #f15c6d;
+      --chat-bg: #111b21;
+      --in: #1f2c34;
+      --out: #005c4b;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--text); font-family: Segoe UI, Arial, sans-serif; }
-    .shell { height: 100vh; display: grid; grid-template-columns: 360px 1fr; }
-    .sidebar { border-right: 1px solid var(--line); display: flex; flex-direction: column; background: var(--panel); }
-    .topbar { background: var(--panel-soft); padding: 10px 12px; border-bottom: 1px solid var(--line); }
-    .row { display: flex; gap: 8px; align-items: center; }
-    input, select, button, textarea { background: #111; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
-    button { cursor: pointer; }
-    button.primary { background: var(--accent); border-color: var(--accent); color: #04140f; font-weight: 600; }
-    button.ghost { background: transparent; }
-    .search { width: 100%; margin-top: 8px; }
-    .chat-list { overflow: auto; flex: 1; }
-    .chat-item { padding: 10px 12px; border-bottom: 1px solid #172026; cursor: pointer; }
-    .chat-item:hover, .chat-item.active { background: #182229; }
-    .chat-item .name { font-weight: 600; font-size: 14px; }
-    .chat-item .meta, .chat-item .preview { color: var(--muted); font-size: 12px; margin-top: 4px; }
-    .main { display: flex; flex-direction: column; background: #0f171d; }
-    .main-head { background: var(--panel-soft); border-bottom: 1px solid var(--line); padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-    .contact-title { font-weight: 700; }
-    .actions { display: flex; gap: 14px; align-items: center; }
-    .switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
-    .messages { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; background-image: radial-gradient(rgba(255,255,255,0.02) 1px, transparent 1px); background-size: 20px 20px; }
-    .bubble { max-width: 72%; padding: 8px 10px; border-radius: 8px; font-size: 14px; line-height: 1.35; }
-    .bubble.user { background: #1f2c34; align-self: flex-start; }
-    .bubble.bot { background: var(--accent-soft); align-self: flex-end; border: 1px solid #1d4e3f; }
-    .bubble .at { color: var(--muted); font-size: 11px; margin-top: 4px; }
-    .composer { border-top: 1px solid var(--line); padding: 10px 12px; display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; align-items: center; background: var(--panel-soft); }
-    .composer textarea { min-height: 44px; max-height: 120px; resize: vertical; width: 100%; }
-    .hint { font-size: 12px; color: var(--muted); padding: 6px 12px; border-top: 1px dashed var(--line); }
+    body { margin: 0; background: var(--app-bg); color: var(--text); font-family: Segoe UI, Arial, sans-serif; }
+    .wrap { width: min(1600px, 100vw); height: 100vh; margin: 0 auto; display: grid; grid-template-columns: 380px 1fr; }
+    .left { background: var(--panel-left); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+    .left-head { background: var(--header); border-bottom: 1px solid var(--line); padding: 10px 12px; }
+    .left-head .row { display: flex; gap: 8px; align-items: center; }
+    .avatar { width: 36px; height: 36px; border-radius: 50%; background: #2a3942; display: grid; place-items: center; font-weight: 700; }
+    .title { font-size: 14px; font-weight: 700; }
+    .sub { font-size: 12px; color: var(--muted); }
+    .search { padding: 8px 12px; border-bottom: 1px solid #172027; }
+    .search input { width: 100%; background: #202c33; border: 1px solid #2b3c46; border-radius: 8px; color: var(--text); padding: 10px 12px; }
+    .list { overflow: auto; flex: 1; }
+    .item { padding: 12px; border-bottom: 1px solid #172027; cursor: pointer; display: grid; grid-template-columns: 48px 1fr auto; gap: 10px; align-items: center; }
+    .item:hover, .item.active { background: #202c33; }
+    .item .bubble-avatar { width: 44px; height: 44px; border-radius: 50%; background: #2a3942; display: grid; place-items: center; font-size: 13px; font-weight: 700; }
+    .item .name { font-weight: 600; font-size: 14px; }
+    .item .preview { color: var(--muted); font-size: 12px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+    .item .time { color: var(--muted); font-size: 11px; }
+    .right { background: var(--panel-right); display: flex; flex-direction: column; }
+    .right-head { background: var(--header); border-bottom: 1px solid var(--line); padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .contact { display: flex; gap: 10px; align-items: center; }
+    .contact .meta .name { font-weight: 700; font-size: 14px; }
+    .contact .meta .state { color: var(--muted); font-size: 12px; }
+    .controls { display: flex; gap: 12px; align-items: center; font-size: 12px; color: var(--muted); }
+    .controls label { display: inline-flex; align-items: center; gap: 6px; }
+    .messages { flex: 1; overflow: auto; padding: 16px; background: radial-gradient(rgba(255,255,255,.03) 1px, transparent 1px); background-size: 22px 22px; }
+    .msg { display: flex; margin-bottom: 10px; }
+    .msg.user { justify-content: flex-start; }
+    .msg.assistant { justify-content: flex-end; }
+    .msg .content { max-width: 68%; background: var(--in); padding: 8px 10px; border-radius: 8px; line-height: 1.35; font-size: 14px; white-space: pre-wrap; word-wrap: break-word; }
+    .msg.assistant .content { background: var(--out); }
+    .msg .at { margin-top: 4px; color: #bfd7ce; font-size: 11px; text-align: right; }
+    .msg.user .at { color: var(--muted); }
+    .composer { border-top: 1px solid var(--line); background: var(--header); display: grid; grid-template-columns: auto auto 1fr auto; gap: 8px; padding: 10px; align-items: center; }
+    .composer button, .composer input[type=file] { background: #1f2a31; border: 1px solid #2c3d47; color: var(--text); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+    .composer textarea { width: 100%; min-height: 42px; max-height: 120px; resize: vertical; background: #111b21; border: 1px solid #2c3d47; color: var(--text); border-radius: 8px; padding: 10px; }
+    .composer .send { background: var(--accent); color: #06241d; border-color: var(--accent); font-weight: 700; }
+    .status { border-top: 1px dashed var(--line); color: var(--muted); font-size: 12px; padding: 6px 10px; }
     .ok { color: #7de7be; }
-    .warn { color: #ffcd6b; }
-    .err { color: var(--danger); }
-    @media (max-width: 980px) {
-      .shell { grid-template-columns: 1fr; }
-      .sidebar { height: 42vh; }
-      .main { height: 58vh; }
-      .composer { grid-template-columns: 1fr auto; }
+    .warn { color: #ffd27a; }
+    .err { color: #ff8a93; }
+    @media (max-width: 1024px) {
+      .wrap { grid-template-columns: 1fr; }
+      .left { height: 42vh; }
+      .right { height: 58vh; }
+      .composer { grid-template-columns: auto 1fr auto; }
+      .composer #recordBtn { display: none; }
     }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <aside class="sidebar">
-      <div class="topbar">
+  <div class="wrap">
+    <section class="left">
+      <div class="left-head">
         <div class="row">
-          <input id="tenantId" placeholder="tenant_id (default)" value="default" style="flex:1" />
-          <input id="instanceName" placeholder="instancia (opcional)" style="flex:1" />
-          <button id="refreshBtn" class="ghost">Atualizar</button>
+          <div class="avatar">A</div>
+          <div style="flex:1">
+            <div class="title">Conversas</div>
+            <div id="instanceInfo" class="sub">Instância: carregando...</div>
+          </div>
+          <button id="refreshBtn" style="background:#1f2a31;border:1px solid #2c3d47;color:#e9edef;border-radius:8px;padding:8px 10px;cursor:pointer;">Atualizar</button>
         </div>
-        <input id="searchInput" class="search" placeholder="Buscar por telefone/mensagem..." />
       </div>
-      <div id="chatList" class="chat-list"></div>
-    </aside>
-
-    <section class="main">
-      <header class="main-head">
-        <div>
-          <div id="contactTitle" class="contact-title">Selecione uma conversa</div>
-          <div id="contactMeta" class="hint" style="padding:0;border:0">Nenhum contato selecionado</div>
+      <div class="search">
+        <input id="searchInput" placeholder="Pesquisar conversa" />
+      </div>
+      <div id="list" class="list"></div>
+    </section>
+    <section class="right">
+      <div class="right-head">
+        <div class="contact">
+          <div class="bubble-avatar" id="contactAvatar">--</div>
+          <div class="meta">
+            <div id="contactName" class="name">Selecione uma conversa</div>
+            <div id="contactState" class="state">Sem contato selecionado</div>
+          </div>
         </div>
-        <div class="actions">
-          <label class="switch"><input id="pauseToggle" type="checkbox" /> Pausar agente</label>
-          <label class="switch"><input id="blockToggle" type="checkbox" /> Bloquear contato</label>
+        <div class="controls">
+          <label><input id="pauseToggle" type="checkbox" /> Pausar agente</label>
+          <label><input id="blockToggle" type="checkbox" /> Bloquear contato</label>
         </div>
-      </header>
-
+      </div>
       <div id="messages" class="messages"></div>
-
       <div class="composer">
-        <textarea id="textInput" placeholder="Digite uma mensagem..."></textarea>
-        <input id="fileInput" type="file" style="display:none" />
-        <button id="attachBtn" class="ghost">Arquivo</button>
-        <button id="recordBtn" class="ghost">Gravar</button>
-        <button id="sendBtn" class="primary">Enviar</button>
+        <button id="attachBtn">Arquivo</button>
+        <button id="recordBtn">Gravar</button>
+        <textarea id="textInput" placeholder="Digite uma mensagem"></textarea>
+        <button id="sendBtn" class="send">Enviar</button>
+        <input id="fileInput" type="file" hidden />
       </div>
-      <div id="statusBar" class="hint">Pronto para operar inbox. A pagina atualiza sozinha.</div>
+      <div id="status" class="status">Carregando inbox...</div>
     </section>
   </div>
-
   <script src="/conversas.js"></script>
 </body>
 </html>
