@@ -1,6 +1,7 @@
 const express = require('express');
 const dotenv = require('dotenv');
 const path = require('path');
+const fs = require('fs');
 
 dotenv.config();
 
@@ -903,32 +904,43 @@ app.post('/webhook/whatsapp', async (req, res) => {
 });
 // ─── Rota raiz (documentação rápida) ─────────────────────────────────────────
 
+const apiOverview = () => ({
+    name: 'SAIPOS API Integration',
+    version: '3.0.0',
+    endpoints: {
+        auth:            'GET  /api/auth?environment=homologation',
+        catalog:         'GET  /api/catalog?environment=homologation',
+        totemCatalog:    'GET  /api/totem/catalog?environment=homologation',
+        totemOrder:      'POST /api/totem/order?environment=homologation',
+        orders:          'GET  /api/orders?environment=homologation&order_id=ID',
+        ordersStatus:    'GET  /api/orders/status?environment=homologation&pad=1&table=5',
+        waiters:         'GET  /api/waiters?environment=homologation',
+        tenants:         'GET  /api/tenants',
+        createTicket:    'POST /api/orders/ticket?environment=homologation',
+        createDelivery:  'POST /api/orders/delivery?environment=homologation',
+        createTable:     'POST /api/orders/table?environment=homologation',
+        cancelOrder:     'POST /api/orders/cancel?environment=homologation',
+        closeOrder:      'PUT  /api/orders/close?environment=homologation',
+        pixGenerate:     'POST /api/payment/pix',
+        pixStatus:       'GET  /api/payment/pix/:id/status',
+        webhookPix:      'POST /webhook/pix',
+        webhookWhatsApp: 'POST /webhook/whatsapp',
+        totemUI:         'GET  /totem.html',
+        lovableUI:       'GET  /lovable/',
+    },
+    environments: ['homologation', 'production'],
+});
+
+app.get('/api', (_req, res) => {
+    res.json(apiOverview());
+});
+
 app.get('/', (_req, res) => {
-    res.json({
-        name: 'SAIPOS API Integration',
-        version: '3.0.0',
-        endpoints: {
-            auth:            'GET  /api/auth?environment=homologation',
-            catalog:         'GET  /api/catalog?environment=homologation',
-            totemCatalog:    'GET  /api/totem/catalog?environment=homologation',
-            totemOrder:      'POST /api/totem/order?environment=homologation',
-            orders:          'GET  /api/orders?environment=homologation&order_id=ID',
-            ordersStatus:    'GET  /api/orders/status?environment=homologation&pad=1&table=5',
-            waiters:         'GET  /api/waiters?environment=homologation',
-            tenants:         'GET  /api/tenants',
-            createTicket:    'POST /api/orders/ticket?environment=homologation',
-            createDelivery:  'POST /api/orders/delivery?environment=homologation',
-            createTable:     'POST /api/orders/table?environment=homologation',
-            cancelOrder:     'POST /api/orders/cancel?environment=homologation',
-            closeOrder:      'PUT  /api/orders/close?environment=homologation',
-            pixGenerate:     'POST /api/payment/pix',
-            pixStatus:       'GET  /api/payment/pix/:id/status',
-            webhookPix:      'POST /webhook/pix',
-            webhookWhatsApp: 'POST /webhook/whatsapp',
-            totemUI:         'GET  /totem.html',
-        },
-        environments: ['homologation', 'production'],
-    });
+    const lovableIndex = path.join(__dirname, 'public', 'lovable', 'index.html');
+    if (fs.existsSync(lovableIndex)) {
+        return res.sendFile(lovableIndex);
+    }
+    return res.json(apiOverview());
 });
 
 // ─── Start ───────────────────────────────────────────────────────────────────
