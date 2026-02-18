@@ -1,4 +1,4 @@
-// QZ Tray JavaScript Library Loader
+﻿// QZ Tray JavaScript Library Loader
 // This file loads the QZ Tray library from CDN
 // Version: 2.2.5
 
@@ -24,3 +24,4 @@
     // console.error('URL tentada:', script.src);
   };
 })();
+
