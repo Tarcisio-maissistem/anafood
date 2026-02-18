@@ -425,6 +425,7 @@ app.post('/api/ana/simulate', async (req, res) => {
             log,
             tenant,
             rawMessage: null,
+            instanceName: req.body?.instance || req.body?.instanceName || null,
         });
 
         return res.json({
@@ -1023,6 +1024,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
             log,
             tenant,
             rawMessage: msg,
+            instanceName,
         });
         if (result?.reply) {
             log('INFO', `Ana -> ${phone}`, { tenantId, reply: result.reply.slice(0, 200) });

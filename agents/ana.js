@@ -74,7 +74,7 @@ function loadState() {
 }
 loadState();
 
-function tenantRuntime(tenant) {
+function tenantRuntime(tenant, runtimeOverrides = {}) {
   return {
     id: tenant?.id || 'default',
     name: tenant?.name || 'Tenant',
@@ -98,7 +98,9 @@ function tenantRuntime(tenant) {
     evolution: {
       apiUrl: tenant?.evolution?.apiUrl || process.env.EVOLUTION_API_URL,
       apiKey: tenant?.evolution?.apiKey || process.env.EVOLUTION_API_KEY,
-      instance: tenant?.evolution?.instance || process.env.EVOLUTION_INSTANCE,
+      instance: runtimeOverrides.instance
+        || tenant?.evolution?.instance
+        || process.env.EVOLUTION_INSTANCE,
     },
   };
 }
@@ -786,8 +788,8 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
   }, BUFFER_WINDOW_MS);
 }
 
-async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvConfig, log, tenant, rawMessage = null }) {
-  const runtime = tenantRuntime(tenant);
+async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvConfig, log, tenant, rawMessage = null, instanceName = null }) {
+  const runtime = tenantRuntime(tenant, { instance: instanceName || undefined });
   const customer = getCustomer(runtime.id, phone);
   const conversation = getConversation(phone, runtime.id);
   log('INFO', 'Ana: enqueue message', {
