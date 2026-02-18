@@ -10,10 +10,18 @@ const { resolveTenant, listTenants } = require('./lib/tenants');
 
 const app = express();
 const PORT = process.env.PORT || 3993;
+const staticNoCacheHeaders = (res, filePath) => {
+    if (/\.(html|js|css)$/i.test(filePath)) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+        res.setHeader('Surrogate-Control', 'no-store');
+    }
+};
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
-app.use('/assets', express.static(path.join(__dirname, 'public', 'lovable', 'assets')));
+app.use(express.static(path.join(__dirname, 'public'), { setHeaders: staticNoCacheHeaders }));
+app.use('/assets', express.static(path.join(__dirname, 'public', 'lovable', 'assets'), { setHeaders: staticNoCacheHeaders }));
 
 // Avoid stale SPA bundles in production proxies/browsers.
 app.use((req, res, next) => {
