@@ -4,6 +4,12 @@ import path from 'node:path';
 const FRONTEND_URL = process.env.LOVABLE_FRONTEND_URL || 'https://ana-food-delivery.lovable.app';
 const OUTPUT_DIR = path.resolve('public', 'lovable');
 
+const sanitizeHtml = (html) => html
+  .replace(
+    /<script\s+defer\s+src="https:\/\/ana-food-delivery\.lovable\.app\/~flock\.js"\s+data-proxy-url="https:\/\/ana-food-delivery\.lovable\.app\/~api\/analytics"><\/script>/gi,
+    '<script defer src="/~flock.js" data-proxy-url="/~api/analytics"></script>',
+  );
+
 const ensureDir = async (filePath) => {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
 };
@@ -52,7 +58,7 @@ const downloadFile = async (assetPath) => {
 async function main() {
   const rootRes = await fetch(FRONTEND_URL);
   if (!rootRes.ok) throw new Error(`Falha ao acessar ${FRONTEND_URL} (${rootRes.status})`);
-  const rootHtml = await rootRes.text();
+  const rootHtml = sanitizeHtml(await rootRes.text());
 
   await cleanOutputDir();
   const assetPaths = collectAssetPaths(rootHtml);

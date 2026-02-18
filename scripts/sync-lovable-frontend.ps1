@@ -11,6 +11,7 @@ if (Test-Path $out) {
 New-Item -ItemType Directory -Path $out | Out-Null
 
 $root = (Invoke-WebRequest -Uri $base -UseBasicParsing).Content
+$root = $root -replace '<script defer src="https://ana-food-delivery\.lovable\.app/~flock\.js" data-proxy-url="https://ana-food-delivery\.lovable\.app/~api/analytics"></script>', '<script defer src="/~flock.js" data-proxy-url="/~api/analytics"></script>'
 Set-Content -Path (Join-Path $out 'index.html') -Value $root -Encoding utf8
 
 $paths = New-Object System.Collections.Generic.HashSet[string]

@@ -26,7 +26,11 @@ app.get('/~flock.js', (_req, res) => {
     res.type('application/javascript').send('');
 });
 app.all('/~api/analytics', (_req, res) => {
-    res.sendStatus(204);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    if (_req.method === 'OPTIONS') return res.sendStatus(204);
+    return res.sendStatus(204);
 });
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
