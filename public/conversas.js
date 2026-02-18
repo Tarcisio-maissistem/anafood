@@ -5,8 +5,10 @@
     refreshBtn: document.getElementById('refreshBtn'),
     searchInput: document.getElementById('searchInput'),
     list: document.getElementById('list'),
+    contactProfile: document.getElementById('contactProfile'),
     contactAvatar: document.getElementById('contactAvatar'),
     contactName: document.getElementById('contactName'),
+    contactPhone: document.getElementById('contactPhone'),
     contactState: document.getElementById('contactState'),
     pauseToggle: document.getElementById('pauseToggle'),
     blockToggle: document.getElementById('blockToggle'),
@@ -22,6 +24,7 @@
     infoPhone: document.getElementById('infoPhone'),
     infoInstance: document.getElementById('infoInstance'),
     infoState: document.getElementById('infoState'),
+    rightStatus: document.getElementById('rightStatus'),
   };
 
   const state = {
@@ -30,6 +33,7 @@
     selectedPhone: '',
     selectedRemoteJid: '',
     selectedConversation: null,
+    contactInfoOpen: false,
     conversations: [],
     recorder: null,
     audioChunks: [],
@@ -38,7 +42,7 @@
 
   function syncContactPanelVisibility() {
     if (!ui.appRoot) return;
-    const hasSelection = Boolean(state.selectedPhone);
+    const hasSelection = Boolean(state.selectedPhone) && Boolean(state.contactInfoOpen);
     ui.appRoot.classList.toggle('contact-selected', hasSelection);
   }
 
@@ -128,6 +132,7 @@
         state.selectedPhone = conversation.phone;
         state.selectedRemoteJid = conversation.remoteJid || `${conversation.phone}@s.whatsapp.net`;
         state.selectedConversation = conversation;
+        state.contactInfoOpen = false;
         renderList();
         await loadControls();
         await loadMessages();
@@ -168,11 +173,17 @@
       ui.messages.innerHTML = '';
       ui.contactAvatar.textContent = '--';
       ui.contactName.textContent = 'Selecione uma conversa';
-      ui.contactState.textContent = 'Sem contato selecionado';
+      ui.contactPhone.textContent = 'Sem contato selecionado';
+      ui.contactState.textContent = 'Clique no perfil para ver detalhes';
       ui.infoAvatar.textContent = '--';
       ui.infoName.textContent = 'Sem contato';
       ui.infoPhone.textContent = 'Selecione uma conversa para visualizar os dados.';
       ui.infoState.textContent = '-';
+      ui.pauseToggle.checked = false;
+      ui.blockToggle.checked = false;
+      ui.pauseToggle.disabled = true;
+      ui.blockToggle.disabled = true;
+      state.contactInfoOpen = false;
       syncContactPanelVisibility();
     }
   }
@@ -190,6 +201,7 @@
     const readableName = displayName(selected) || state.selectedPhone;
     renderAvatar(ui.contactAvatar, selected);
     ui.contactName.textContent = readableName;
+    ui.contactPhone.textContent = state.selectedPhone || '-';
     ui.contactState.textContent = `Carregando... | Instância: ${state.instance || '-'}`;
 
     renderAvatar(ui.infoAvatar, selected);
@@ -210,6 +222,8 @@
     const conversationState = (sessionData && sessionData.state) || 'INIT';
     const phone = state.selectedPhone;
     ui.contactState.textContent = `Estado: ${conversationState} | Instância: ${state.instance || '-'}`;
+    ui.pauseToggle.disabled = false;
+    ui.blockToggle.disabled = false;
     ui.infoPhone.textContent = phone;
     ui.infoInstance.textContent = state.instance || '-';
     ui.infoState.textContent = conversationState;
@@ -352,6 +366,12 @@
 
   ui.searchInput.oninput = function () {
     loadConversations().catch((e) => setStatus(e.message, 'err'));
+  };
+
+  ui.contactProfile.onclick = function () {
+    if (!state.selectedPhone) return;
+    state.contactInfoOpen = !state.contactInfoOpen;
+    syncContactPanelVisibility();
   };
 
   ui.pauseToggle.onchange = function () {

@@ -58,6 +58,14 @@
       align-items: center;
       gap: 12px;
     }
+    .contact-profile {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+      cursor: pointer;
+    }
+    .contact-profile:hover { opacity: 0.92; }
     .avatar {
       width: 40px;
       height: 40px;
@@ -86,6 +94,22 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-left: auto;
+      color: #d3dde3;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .actions label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+    .actions input { accent-color: var(--accent); }
     .btn {
       background: #1f2a31;
       border: 1px solid #2c3d47;
@@ -259,6 +283,7 @@
       .middle { min-height: 58vh; border-right: none; }
       .composer { grid-template-columns: auto 1fr auto; }
       #recordBtn { display: none; }
+      .actions { display: none; }
     }
   </style>
 </head>
@@ -281,10 +306,17 @@
 
     <section class="middle">
       <div class="head">
-        <div id="contactAvatar" class="avatar">--</div>
-        <div class="grow">
-          <div id="contactName" class="title">Selecione uma conversa</div>
-          <div id="contactState" class="sub">Sem contato selecionado</div>
+        <div id="contactProfile" class="contact-profile">
+          <div id="contactAvatar" class="avatar">--</div>
+          <div class="grow">
+            <div id="contactName" class="title">Selecione uma conversa</div>
+            <div id="contactPhone" class="sub">Sem contato selecionado</div>
+            <div id="contactState" class="sub">Clique no perfil para ver detalhes</div>
+          </div>
+        </div>
+        <div class="actions">
+          <label><input id="pauseToggle" type="checkbox" /> Pausar agente</label>
+          <label><input id="blockToggle" type="checkbox" /> Bloquear contato</label>
         </div>
       </div>
       <div id="messages" class="messages"></div>
@@ -308,9 +340,8 @@
         <div id="infoPhone" class="meta">Selecione uma conversa para visualizar os dados.</div>
       </div>
       <div class="pane flags">
-        <h3>Ações</h3>
-        <label><input id="pauseToggle" type="checkbox" /> Pausar agente</label>
-        <label><input id="blockToggle" type="checkbox" /> Bloquear contato</label>
+        <h3>Status do contato</h3>
+        <div id="rightStatus" class="sub">Use os controles na barra superior.</div>
       </div>
       <div class="pane">
         <h3>Instância ativa</h3>
