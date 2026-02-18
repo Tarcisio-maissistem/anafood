@@ -650,14 +650,40 @@ async function sendWhatsAppMessage(phone, text, runtime) {
 async function runPipeline({ conversation, customer, groupedText, normalized, runtime, apiRequest, getEnvConfig, log }) {
   const classification = await classifierAgent({ runtime, conversation, groupedText: normalized.normalizedText || groupedText });
   const extracted = classification.requires_extraction ? await extractorAgent({ runtime, groupedText: normalized.normalizedText || groupedText }) : {};
+  log('INFO', 'Ana: classification/extraction', {
+    tenantId: runtime.id,
+    phone: conversation.phone,
+    state: conversation.state,
+    intent: classification.intent,
+    confidence: classification.confidence,
+    requiresExtraction: classification.requires_extraction,
+    extracted,
+  });
 
   await maybeLoadCatalog(conversation, runtime, apiRequest, getEnvConfig, log);
 
   const previousState = conversation.state;
   const orchestratorResult = orchestrate({ runtime, conversation, classification, extracted, groupedText: normalized.normalizedText || groupedText });
   conversation.state = orchestratorResult.nextState;
+  log('INFO', 'Ana: orchestration', {
+    tenantId: runtime.id,
+    phone: conversation.phone,
+    previousState,
+    nextState: conversation.state,
+    action: orchestratorResult.action,
+    missing: orchestratorResult.missing,
+    provider: runtime.orderProvider,
+  });
 
   if (orchestratorResult.action === 'CREATE_ORDER_AND_WAIT_PAYMENT' || orchestratorResult.action === 'CREATE_ORDER_AND_CONFIRM') {
+    log('INFO', 'Ana: creating order on provider', {
+      tenantId: runtime.id,
+      phone: conversation.phone,
+      provider: runtime.orderProvider,
+      mode: conversation.transaction.mode,
+      payment: conversation.transaction.payment,
+      itemsCount: Array.isArray(conversation.transaction.items) ? conversation.transaction.items.length : 0,
+    });
     const order = await createOrderByProviderIfNeeded({ conversation, runtime, apiRequest, getEnvConfig, log });
     if (!order.ok) {
       conversation.consecutiveFailures = (conversation.consecutiveFailures || 0) + 1;
@@ -671,6 +697,14 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       persistStateDebounced();
       return { success: true, reply: failText };
     }
+    log('INFO', 'Ana: order create result', {
+      tenantId: runtime.id,
+      phone: conversation.phone,
+      provider: runtime.orderProvider,
+      ok: order.ok,
+      order_id: order.order_id || conversation.transaction.order_id || null,
+      unresolved: order.unresolved || [],
+    });
     if (orchestratorResult.action === 'CREATE_ORDER_AND_CONFIRM') {
       customer.totalOrders = (customer.totalOrders || 0) + 1;
       conversation.consecutiveFailures = 0;
@@ -726,6 +760,13 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
     processing.add(key);
     try {
       const normalized = await normalizeMessageBlock({ rawText: groupedText, rawMessage: lastRawMessage });
+      log('INFO', 'Ana: processing grouped message', {
+        tenantId: runtime.id,
+        phone: conversation.phone,
+        groupedText: groupedText.slice(0, 200),
+        normalizedText: (normalized.normalizedText || '').slice(0, 200),
+        sourceType: normalized.sourceType,
+      });
       appendMessage(conversation, 'user', normalized.normalizedText || groupedText, {
         sourceType: normalized.sourceType,
         originalText: normalized.originalText,
@@ -749,6 +790,12 @@ async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvCon
   const runtime = tenantRuntime(tenant);
   const customer = getCustomer(runtime.id, phone);
   const conversation = getConversation(phone, runtime.id);
+  log('INFO', 'Ana: enqueue message', {
+    tenantId: runtime.id,
+    phone,
+    state: conversation.state,
+    textPreview: cleanText(messageText || '').slice(0, 120),
+  });
 
   enqueueMessageBlock({
     conversation,

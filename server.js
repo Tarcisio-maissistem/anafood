@@ -5,7 +5,7 @@ const fs = require('fs');
 
 dotenv.config();
 
-const { handleWhatsAppMessage } = require('./agents/ana');
+const { handleWhatsAppMessage, sessions: anaSessions } = require('./agents/ana');
 const { resolveTenant, listTenants } = require('./lib/tenants');
 
 const app = express();
@@ -352,6 +352,93 @@ app.get('/api/tenants', (_req, res) => {
         },
     }));
     res.json({ success: true, count: tenants.length, tenants });
+});
+
+/**
+ * GET /api/ana/session
+ * Inspeciona sessao conversacional atual por telefone/tenant.
+ * Query: phone, tenant_id (opcional), instance (opcional)
+ */
+app.get('/api/ana/session', (req, res) => {
+    const phoneRaw = String(req.query.phone || '').trim();
+    const phone = phoneRaw.replace(/\D/g, '');
+    if (!phone) {
+        return res.status(400).json({ success: false, error: 'Parametro "phone" e obrigatorio' });
+    }
+
+    const tenant = resolveTenant({
+        tenantId: req.query.tenant_id || req.query.tenant || null,
+        instanceName: req.query.instance || null,
+    });
+    const tenantId = tenant?.id || 'default';
+    const key = `${tenantId}:${phone}`;
+    const session = anaSessions.get(key);
+
+    if (!session) {
+        return res.json({ success: true, found: false, tenantId, phone, key });
+    }
+
+    return res.json({
+        success: true,
+        found: true,
+        tenantId,
+        phone,
+        key,
+        state: session.state,
+        contextSummary: session.contextSummary || '',
+        messageCount: session.messageCount || 0,
+        consecutiveFailures: session.consecutiveFailures || 0,
+        lastActivityAt: session.lastActivityAt,
+        transaction: session.transaction || {},
+        recentMessages: Array.isArray(session.messages) ? session.messages.slice(-12) : [],
+    });
+});
+
+/**
+ * POST /api/ana/simulate
+ * Simula mensagem recebida de cliente (sem depender do webhook Evolution).
+ * Body: { phone, text, tenant_id?, tenant?, instance? }
+ */
+app.post('/api/ana/simulate', async (req, res) => {
+    try {
+        const phoneRaw = String(req.body?.phone || '').trim();
+        const text = String(req.body?.text || '').trim();
+        const phone = phoneRaw.replace(/\D/g, '');
+
+        if (!phone || !text) {
+            return res.status(400).json({ success: false, error: 'Campos "phone" e "text" sao obrigatorios' });
+        }
+
+        const tenant = resolveTenant({
+            tenantId: req.body?.tenant_id || req.body?.tenant || null,
+            instanceName: req.body?.instance || req.body?.instanceName || null,
+        });
+        const tenantId = tenant?.id || 'default';
+
+        const boundApiRequest = (environment, method, apiPath, body = null) =>
+            apiRequest(environment, method, apiPath, body, tenant);
+        const boundGetEnvConfig = (environment) => getEnvConfig(environment, tenant);
+
+        const result = await handleWhatsAppMessage(phone, text, {
+            apiRequest: boundApiRequest,
+            getEnvConfig: boundGetEnvConfig,
+            log,
+            tenant,
+            rawMessage: null,
+        });
+
+        return res.json({
+            success: true,
+            tenantId,
+            phone,
+            queued: result?.queued || false,
+            conversationId: result?.conversationId || `${tenantId}:${phone}`,
+            state: result?.state || null,
+            bufferWindowMs: result?.bufferWindowMs || null,
+        });
+    } catch (error) {
+        handleError(res, error);
+    }
 });
 
 /**
