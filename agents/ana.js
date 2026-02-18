@@ -137,6 +137,7 @@ function getConversation(phone, tenantId = 'default') {
         total_amount: 0,
         order_id: null,
       },
+      greeted: false,
       messages: [],
       catalog: null,
     };
@@ -300,8 +301,13 @@ function orchestrate({ runtime, conversation, classification, extracted, grouped
   }
 
   if (s === STATES.INIT) {
-    if (i === INTENTS.SAUDACAO) return { nextState: STATES.INIT, action: 'WELCOME', missing: [] };
+    if (i === INTENTS.SAUDACAO) {
+      if (conversation.greeted) return { nextState: STATES.INIT, action: 'CLARIFY', missing: [] };
+      conversation.greeted = true;
+      return { nextState: STATES.INIT, action: 'WELCOME', missing: [] };
+    }
     if (i === INTENTS.NOVO_PEDIDO) {
+      conversation.greeted = true;
       const missing = restaurantMissingFields(runtime, conversation.transaction);
       return missing.length ? { nextState: STATES.COLLECTING_DATA, action: 'ASK_MISSING_FIELDS', missing } : { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
     }

@@ -170,6 +170,30 @@ const apiRequest = async (environment, method, path, body = null, tenant = null)
 
 const normalizePhone = (value) => String(value || '').replace(/\D/g, '');
 const safeTrim = (value) => String(value || '').trim();
+const isLikelyPhoneDigits = (value) => /^\d{10,15}$/.test(String(value || ''));
+
+const findSessionByRemoteJid = (tenantId, remoteJid) => {
+    const target = String(remoteJid || '').trim().toLowerCase();
+    if (!target) return null;
+    for (const session of anaSessions.values()) {
+        if (String(session?.tenantId || 'default') !== String(tenantId || 'default')) continue;
+        const current = String(session?.remoteJid || '').trim().toLowerCase();
+        if (current && current === target) return session;
+    }
+    return null;
+};
+
+const resolveCanonicalPhone = ({ tenantId, phone, remoteJid }) => {
+    const p = normalizePhone(phone || '');
+    if (isLikelyPhoneDigits(p)) return p;
+
+    const byJid = findSessionByRemoteJid(tenantId, remoteJid);
+    if (byJid?.phone) return normalizePhone(byJid.phone);
+
+    if (p) return p;
+    const fromJid = normalizePhone(String(remoteJid || '').split('@')[0] || '');
+    return fromJid;
+};
 
 const getContactKey = (tenantId, phone) => `${tenantId}:${normalizePhone(phone)}`;
 
@@ -953,7 +977,11 @@ app.get('/api/ana/conversations', (req, res) => {
         .map(([key, session]) => ({ key, session }))
         .filter(({ session }) => String(session?.tenantId || 'default') === tenantId)
         .map(({ session }) => {
-            const phone = normalizePhone(session?.phone || '');
+            const phone = resolveCanonicalPhone({
+                tenantId,
+                phone: session?.phone || '',
+                remoteJid: session?.remoteJid || '',
+            });
             const messages = Array.isArray(session?.messages) ? session.messages : [];
             const lastMessage = messages.length ? messages[messages.length - 1] : null;
             const control = getContactControl(tenantId, phone);
@@ -996,11 +1024,27 @@ app.get('/api/ana/conversations', (req, res) => {
         }
 
         const merged = new Map();
+        const mergeKey = (row) => {
+            const phone = normalizePhone(row?.phone || '');
+            if (isLikelyPhoneDigits(phone)) return `p:${phone}`;
+            const jid = safeTrim(row?.remoteJid || '').toLowerCase();
+            if (jid) return `r:${jid}`;
+            return `p:${phone || '-'}`;
+        };
         for (const row of evolutionRows) {
-            if (!row?.phone) continue;
-            const control = getContactControl(tenantId, row.phone);
-            merged.set(row.phone, {
+            if (!row?.phone && !row?.remoteJid) continue;
+            const canonicalPhone = resolveCanonicalPhone({
+                tenantId,
                 phone: row.phone,
+                remoteJid: row.remoteJid,
+            });
+            const control = getContactControl(tenantId, canonicalPhone);
+            const normalizedRow = {
+                ...row,
+                phone: canonicalPhone || normalizePhone(row.phone || ''),
+            };
+            merged.set(mergeKey(normalizedRow), {
+                phone: normalizedRow.phone,
                 remoteJid: row.remoteJid || `${row.phone}@s.whatsapp.net`,
                 name: safeTrim(row.name || ''),
                 avatarUrl: safeTrim(row.avatarUrl || ''),
@@ -1014,9 +1058,10 @@ app.get('/api/ana/conversations', (req, res) => {
         }
 
         for (const row of inMemoryRows) {
-            if (!row?.phone) continue;
-            const current = merged.get(row.phone) || {};
-            merged.set(row.phone, {
+            if (!row?.phone && !row?.remoteJid) continue;
+            const key = mergeKey(row);
+            const current = merged.get(key) || {};
+            merged.set(key, {
                 ...current,
                 ...row,
                 remoteJid: current.remoteJid || `${row.phone}@s.whatsapp.net`,
@@ -1054,17 +1099,24 @@ app.get('/api/ana/conversations', (req, res) => {
  * Query: phone (obrigatorio), tenant_id?, instance?, limit?
  */
 app.get('/api/ana/messages', (req, res) => {
-    const phone = normalizePhone(req.query?.phone || '');
-    if (!phone) return res.status(400).json({ success: false, error: 'Parametro "phone" e obrigatorio' });
-
     const tenant = resolveTenant({
         tenantId: req.query?.tenant_id || req.query?.tenant || null,
         instanceName: req.query?.instance || null,
     });
     const tenantId = tenant?.id || 'default';
+    const requestedPhone = normalizePhone(req.query?.phone || '');
+    const requestedRemoteJid = String(req.query?.remoteJid || '').trim();
+    const phone = resolveCanonicalPhone({
+        tenantId,
+        phone: requestedPhone,
+        remoteJid: requestedRemoteJid,
+    });
+    if (!phone && !requestedRemoteJid) {
+        return res.status(400).json({ success: false, error: 'Parametro "phone" ou "remoteJid" e obrigatorio' });
+    }
     const limit = Math.max(1, Math.min(300, Number(req.query?.limit || 80)));
     const evo = getEvolutionConfig(tenant, req.query?.instance || null);
-    const remoteJid = String(req.query?.remoteJid || `${phone}@s.whatsapp.net`).trim();
+    const remoteJid = requestedRemoteJid || `${phone}@s.whatsapp.net`;
 
     const run = async () => {
         const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
@@ -1144,20 +1196,26 @@ app.post('/api/ana/contact-control', (req, res) => {
  */
 app.post('/api/ana/send', async (req, res) => {
     try {
-        const phone = normalizePhone(req.body?.phone || '');
-        if (!phone) return res.status(400).json({ success: false, error: 'Campo "phone" e obrigatorio' });
-
         const tenant = resolveTenant({
             tenantId: req.body?.tenant_id || req.body?.tenant || null,
             instanceName: req.body?.instance || null,
         });
         const tenantId = tenant?.id || 'default';
+        const requestedPhone = normalizePhone(req.body?.phone || '');
+        const remoteJid = String(req.body?.remoteJid || '').trim();
+        const phone = resolveCanonicalPhone({
+            tenantId,
+            phone: requestedPhone,
+            remoteJid,
+        });
+        if (!phone && !remoteJid) {
+            return res.status(400).json({ success: false, error: 'Campo "phone" ou "remoteJid" e obrigatorio' });
+        }
         const evo = getEvolutionConfig(tenant, req.body?.instance || null);
         const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
         const resolvedInstance = pickBestEvolutionInstance(evo.instance, availableInstances);
 
         const text = String(req.body?.text || '').trim();
-        const remoteJid = String(req.body?.remoteJid || '').trim();
         const mediaBase64 = String(req.body?.mediaBase64 || '').trim();
         const mimeType = String(req.body?.mimeType || '').trim();
         const fileName = String(req.body?.fileName || '').trim();
@@ -1735,7 +1793,13 @@ app.post('/webhook/whatsapp', async (req, res) => {
             || '';
         const participantJid = key.participant || payload.participant || payload?.messages?.[0]?.key?.participant || '';
         const sourceJid = String(remoteJid).endsWith('@g.us') && participantJid ? participantJid : remoteJid;
-        const phone = String(sourceJid || '').split('@')[0].replace(/\D/g, '');
+        const tenantId = tenant?.id || 'default';
+        const rawPhone = String(sourceJid || '').split('@')[0].replace(/\D/g, '');
+        const phone = resolveCanonicalPhone({
+            tenantId,
+            phone: rawPhone,
+            remoteJid: sourceJid,
+        });
         if (!phone) {
             log('WARN', 'Webhook WhatsApp sem telefone valido', {
                 event: req.body?.event || req.body?.type || null,
@@ -1747,7 +1811,6 @@ app.post('/webhook/whatsapp', async (req, res) => {
             return;
         }
 
-        const tenantId = tenant?.id || 'default';
         const control = getContactControl(tenantId, phone);
         if (control.blocked) {
             log('INFO', 'Contato bloqueado: mensagem ignorada', { tenantId, phone, instanceName });
