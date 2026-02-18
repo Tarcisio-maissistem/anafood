@@ -1169,11 +1169,55 @@ app.get('/api/ana/conversations', (req, res) => {
             });
         }
 
-        const rows = Array.from(merged.values())
+        const baseRows = Array.from(merged.values())
             .filter((c) => !search
                 || c.phone.includes(search)
                 || String(c?.name || '').toLowerCase().includes(search)
                 || String(c?.lastMessage?.content || '').toLowerCase().includes(search))
+            .sort((a, b) => new Date(b.lastActivityAt || 0).getTime() - new Date(a.lastActivityAt || 0).getTime());
+
+        const dedup = new Map();
+        const quality = (row) => {
+            let score = 0;
+            if (isLikelyPhoneDigits(row?.phone)) score += 8;
+            if (String(row?.name || '').trim()) score += 4;
+            if (String(row?.avatarUrl || '').trim()) score += 2;
+            if (String(row?.lastMessage?.content || '').trim()) score += 2;
+            if (String(row?.remoteJid || '').endsWith('@s.whatsapp.net')) score += 2;
+            return score;
+        };
+
+        for (const row of baseRows) {
+            const phone = normalizePhone(row?.phone || '');
+            const jid = String(row?.remoteJid || '').toLowerCase();
+            const nameKey = String(row?.name || '').trim().toLowerCase();
+            const avatarKey = String(row?.avatarUrl || '').trim().toLowerCase();
+            const keyPrimary = isLikelyPhoneDigits(phone)
+                ? `phone:${phone}`
+                : (avatarKey ? `avatar:${avatarKey}` : (nameKey ? `name:${nameKey}` : `jid:${jid}`));
+
+            const existing = dedup.get(keyPrimary);
+            if (!existing) {
+                dedup.set(keyPrimary, row);
+                continue;
+            }
+            const winner = quality(row) > quality(existing) ? row : existing;
+            const mergedRow = {
+                ...existing,
+                ...winner,
+                phone: isLikelyPhoneDigits(existing?.phone) ? existing.phone : winner.phone,
+                name: String(winner?.name || existing?.name || '').trim(),
+                avatarUrl: String(winner?.avatarUrl || existing?.avatarUrl || '').trim(),
+                remoteJid: String(winner?.remoteJid || existing?.remoteJid || '').trim(),
+                lastMessage: winner?.lastMessage || existing?.lastMessage || null,
+                lastActivityAt: (new Date(winner?.lastActivityAt || 0).getTime() >= new Date(existing?.lastActivityAt || 0).getTime())
+                    ? winner?.lastActivityAt
+                    : existing?.lastActivityAt,
+            };
+            dedup.set(keyPrimary, mergedRow);
+        }
+
+        const rows = Array.from(dedup.values())
             .sort((a, b) => new Date(b.lastActivityAt || 0).getTime() - new Date(a.lastActivityAt || 0).getTime())
             .slice(0, limit);
 
@@ -1957,6 +2001,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
         if (!payload) return;
 
         const key = payload.key || payload?.messages?.[0]?.key || {};
+        const messageId = key?.id || payload?.messages?.[0]?.key?.id || payload?.id || '';
         const fromMe = Boolean(key.fromMe ?? payload.fromMe ?? payload?.messages?.[0]?.key?.fromMe);
         if (fromMe) return;
 
@@ -2061,6 +2106,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
             instanceName,
             remoteJid,
             contactName,
+            messageId,
             onSend: ({ phone: sentPhone, text: sentText, remoteJid: sentRemoteJid, instance: sentInstance }) => {
                 logConversationEvent({
                     direction: 'OUT',

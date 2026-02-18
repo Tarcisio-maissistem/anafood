@@ -43,6 +43,7 @@ const conversations = new Map();
 const buffers = new Map();
 const processing = new Set();
 const agentSettings = new Map();
+const inboundMessageSeen = new Map();
 
 const STATE_FILE = process.env.ANA_STATE_FILE
   ? path.resolve(process.env.ANA_STATE_FILE)
@@ -884,7 +885,10 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
 
   if (text) buffer.chunks.push(text);
   if (rawMessage) buffer.rawMessages.push(rawMessage);
-  if (buffer.timer) return;
+  if (buffer.timer) {
+    clearTimeout(buffer.timer);
+    buffer.timer = null;
+  }
 
   buffer.timer = setTimeout(async () => {
     const current = buffers.get(key);
@@ -939,10 +943,39 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
   }, runtime.bufferWindowMs || BUFFER_WINDOW_MS);
 }
 
-async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvConfig, log, tenant, rawMessage = null, instanceName = null, remoteJid = null, contactName = '', onSend = null }) {
+async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvConfig, log, tenant, rawMessage = null, instanceName = null, remoteJid = null, contactName = '', messageId = '', onSend = null }) {
   const runtime = tenantRuntime(tenant, { instance: instanceName || undefined });
   const customer = getCustomer(runtime.id, phone);
   const conversation = getConversation(phone, runtime.id);
+  const inboundId = String(
+    messageId ||
+    rawMessage?.key?.id ||
+    rawMessage?.id ||
+    rawMessage?.messageId ||
+    ''
+  ).trim();
+  if (inboundId) {
+    const seenKey = `${conversation.id}:${inboundId}`;
+    const now = Date.now();
+    const previous = inboundMessageSeen.get(seenKey);
+    if (previous && now - previous < 5 * 60 * 1000) {
+      return {
+        success: true,
+        queued: false,
+        duplicate: true,
+        conversationId: conversation.id,
+        state: conversation.state,
+        bufferWindowMs: runtime.bufferWindowMs || BUFFER_WINDOW_MS,
+      };
+    }
+    inboundMessageSeen.set(seenKey, now);
+    if (inboundMessageSeen.size > 5000) {
+      const cutoff = now - (10 * 60 * 1000);
+      for (const [k, ts] of inboundMessageSeen.entries()) {
+        if (ts < cutoff) inboundMessageSeen.delete(k);
+      }
+    }
+  }
   if (remoteJid) conversation.remoteJid = remoteJid;
   if (contactName) conversation.contactName = contactName;
   log('INFO', 'Ana: enqueue message', {
