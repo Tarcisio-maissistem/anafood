@@ -13,6 +13,21 @@ const PORT = process.env.PORT || 3993;
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/assets', express.static(path.join(__dirname, 'public', 'lovable', 'assets')));
+
+app.get('/qz-tray.js', (_req, res) => {
+    const file = path.join(__dirname, 'public', 'lovable', 'qz-tray.js');
+    if (!fs.existsSync(file)) return res.sendStatus(404);
+    return res.sendFile(file);
+});
+
+// Optional analytics endpoints referenced by mirrored Lovable build.
+app.get('/~flock.js', (_req, res) => {
+    res.type('application/javascript').send('');
+});
+app.all('/~api/analytics', (_req, res) => {
+    res.sendStatus(204);
+});
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
