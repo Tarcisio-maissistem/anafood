@@ -10,6 +10,7 @@ const { resolveTenant, listTenants } = require('./lib/tenants');
 
 const app = express();
 const PORT = process.env.PORT || 3993;
+const contactControls = new Map();
 const staticNoCacheHeaders = (res, filePath) => {
     if (/\.(html|js|css)$/i.test(filePath)) {
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -165,6 +166,135 @@ const apiRequest = async (environment, method, path, body = null, tenant = null)
     }
 
     return data;
+};
+
+const normalizePhone = (value) => String(value || '').replace(/\D/g, '');
+
+const getContactKey = (tenantId, phone) => `${tenantId}:${normalizePhone(phone)}`;
+
+const getContactControl = (tenantId, phone) => {
+    const key = getContactKey(tenantId, phone);
+    return contactControls.get(key) || { paused: false, blocked: false };
+};
+
+const setContactControl = (tenantId, phone, patch) => {
+    const key = getContactKey(tenantId, phone);
+    const current = contactControls.get(key) || { paused: false, blocked: false };
+    const updated = {
+        paused: Boolean(patch?.paused ?? current.paused),
+        blocked: Boolean(patch?.blocked ?? current.blocked),
+        updatedAt: new Date().toISOString(),
+    };
+    contactControls.set(key, updated);
+    return updated;
+};
+
+const getEvolutionConfig = (tenant, instanceName = null) => ({
+    apiUrl: tenant?.evolution?.apiUrl || process.env.EVOLUTION_API_URL || '',
+    apiKey: tenant?.evolution?.apiKey || process.env.EVOLUTION_API_KEY || '',
+    instance: instanceName || tenant?.evolution?.instance || process.env.EVOLUTION_INSTANCE || '',
+});
+
+const sendEvolutionText = async ({ apiUrl, apiKey, instance, phone, text }) => {
+    const safeText = String(text || '').trim();
+    if (!apiUrl || !apiKey || !instance || !safeText) return { ok: false, error: 'Parametros invalidos para envio' };
+
+    const rawPhone = String(phone || '').trim();
+    const digitsPhone = normalizePhone(rawPhone);
+    const numbers = Array.from(new Set([rawPhone, digitsPhone, digitsPhone ? `${digitsPhone}@s.whatsapp.net` : ''].filter(Boolean)));
+    const endpoints = [
+        `${apiUrl}/message/sendText/${instance}`,
+        `${apiUrl}/message/sendText/${instance}?delay=600`,
+    ];
+    const payloads = [
+        { number: null, text: safeText, delay: 600 },
+        { number: null, textMessage: { text: safeText }, options: { delay: 600 } },
+        { number: null, textMessage: { text: safeText } },
+    ];
+
+    let lastError = null;
+    for (const number of numbers) {
+        for (const endpoint of endpoints) {
+            for (const payloadTemplate of payloads) {
+                try {
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: {
+                            apikey: apiKey,
+                            Authorization: `Bearer ${apiKey}`,
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ ...payloadTemplate, number }),
+                    });
+                    if (response.ok) return { ok: true };
+                    const bodyText = await response.text().catch(() => '');
+                    lastError = `HTTP ${response.status} ${bodyText}`;
+                } catch (err) {
+                    lastError = err.message;
+                }
+            }
+        }
+    }
+    return { ok: false, error: lastError || 'Falha desconhecida no envio de texto' };
+};
+
+const sendEvolutionMedia = async ({ apiUrl, apiKey, instance, phone, base64, mimeType, fileName, caption = '' }) => {
+    if (!apiUrl || !apiKey || !instance || !base64) return { ok: false, error: 'Parametros invalidos para envio de midia' };
+
+    const rawPhone = String(phone || '').trim();
+    const digitsPhone = normalizePhone(rawPhone);
+    const numbers = Array.from(new Set([rawPhone, digitsPhone, digitsPhone ? `${digitsPhone}@s.whatsapp.net` : ''].filter(Boolean)));
+    const endpoints = [
+        `${apiUrl}/message/sendMedia/${instance}`,
+        `${apiUrl}/message/sendFileFromBase64/${instance}`,
+    ];
+    const payloads = [
+        {
+            number: null,
+            mediatype: 'document',
+            mimetype: mimeType || 'application/octet-stream',
+            fileName: fileName || 'arquivo.bin',
+            caption,
+            media: base64,
+        },
+        {
+            number: null,
+            options: { delay: 600 },
+            mediaMessage: {
+                mediatype: 'document',
+                mimetype: mimeType || 'application/octet-stream',
+                fileName: fileName || 'arquivo.bin',
+                caption,
+                media: base64,
+            },
+        },
+    ];
+
+    let lastError = null;
+    for (const number of numbers) {
+        for (const endpoint of endpoints) {
+            for (const payloadTemplate of payloads) {
+                try {
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: {
+                            apikey: apiKey,
+                            Authorization: `Bearer ${apiKey}`,
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ ...payloadTemplate, number }),
+                    });
+                    if (response.ok) return { ok: true };
+                    const bodyText = await response.text().catch(() => '');
+                    lastError = `HTTP ${response.status} ${bodyText}`;
+                } catch (err) {
+                    lastError = err.message;
+                }
+            }
+        }
+    }
+
+    return { ok: false, error: lastError || 'Falha desconhecida no envio de midia' };
 };
 
 const getTenantFromRequest = (req) => {
@@ -440,6 +570,153 @@ app.post('/api/ana/simulate', async (req, res) => {
             state: result?.state || null,
             bufferWindowMs: result?.bufferWindowMs || null,
         });
+    } catch (error) {
+        handleError(res, error);
+    }
+});
+
+/**
+ * GET /api/ana/conversations
+ * Lista conversas conhecidas para inbox operacional.
+ * Query: tenant_id (opcional), instance (opcional), search (opcional)
+ */
+app.get('/api/ana/conversations', (req, res) => {
+    const tenant = resolveTenant({
+        tenantId: req.query?.tenant_id || req.query?.tenant || null,
+        instanceName: req.query?.instance || null,
+    });
+    const tenantId = tenant?.id || 'default';
+    const search = String(req.query?.search || '').trim().toLowerCase();
+
+    const rows = Array.from(anaSessions.entries())
+        .map(([key, session]) => ({ key, session }))
+        .filter(({ session }) => String(session?.tenantId || 'default') === tenantId)
+        .map(({ session }) => {
+            const phone = normalizePhone(session?.phone || '');
+            const messages = Array.isArray(session?.messages) ? session.messages : [];
+            const lastMessage = messages.length ? messages[messages.length - 1] : null;
+            const control = getContactControl(tenantId, phone);
+            return {
+                phone,
+                state: session?.state || 'INIT',
+                lastActivityAt: session?.lastActivityAt || session?.createdAt || null,
+                messageCount: session?.messageCount || 0,
+                lastMessage: lastMessage ? {
+                    role: lastMessage.role || 'user',
+                    content: String(lastMessage.content || '').slice(0, 280),
+                    at: lastMessage.at || null,
+                } : null,
+                paused: control.paused,
+                blocked: control.blocked,
+            };
+        })
+        .filter((c) => !search || c.phone.includes(search) || String(c?.lastMessage?.content || '').toLowerCase().includes(search))
+        .sort((a, b) => new Date(b.lastActivityAt || 0).getTime() - new Date(a.lastActivityAt || 0).getTime());
+
+    return res.json({ success: true, tenantId, count: rows.length, conversations: rows });
+});
+
+/**
+ * GET /api/ana/contact-control
+ * Query: phone (obrigatorio), tenant_id (opcional), instance (opcional)
+ */
+app.get('/api/ana/contact-control', (req, res) => {
+    const phone = normalizePhone(req.query?.phone || '');
+    if (!phone) return res.status(400).json({ success: false, error: 'Parametro "phone" e obrigatorio' });
+
+    const tenant = resolveTenant({
+        tenantId: req.query?.tenant_id || req.query?.tenant || null,
+        instanceName: req.query?.instance || null,
+    });
+    const tenantId = tenant?.id || 'default';
+    const control = getContactControl(tenantId, phone);
+    return res.json({ success: true, tenantId, phone, control });
+});
+
+/**
+ * POST /api/ana/contact-control
+ * Body: { phone, paused?, blocked?, tenant_id?, instance? }
+ */
+app.post('/api/ana/contact-control', (req, res) => {
+    const phone = normalizePhone(req.body?.phone || '');
+    if (!phone) return res.status(400).json({ success: false, error: 'Campo "phone" e obrigatorio' });
+
+    const tenant = resolveTenant({
+        tenantId: req.body?.tenant_id || req.body?.tenant || null,
+        instanceName: req.body?.instance || null,
+    });
+    const tenantId = tenant?.id || 'default';
+    const control = setContactControl(tenantId, phone, {
+        paused: req.body?.paused,
+        blocked: req.body?.blocked,
+    });
+    return res.json({ success: true, tenantId, phone, control });
+});
+
+/**
+ * POST /api/ana/send
+ * Body: { phone, text?, mediaBase64?, mimeType?, fileName?, caption?, tenant_id?, instance? }
+ */
+app.post('/api/ana/send', async (req, res) => {
+    try {
+        const phone = normalizePhone(req.body?.phone || '');
+        if (!phone) return res.status(400).json({ success: false, error: 'Campo "phone" e obrigatorio' });
+
+        const tenant = resolveTenant({
+            tenantId: req.body?.tenant_id || req.body?.tenant || null,
+            instanceName: req.body?.instance || null,
+        });
+        const tenantId = tenant?.id || 'default';
+        const evo = getEvolutionConfig(tenant, req.body?.instance || null);
+
+        const text = String(req.body?.text || '').trim();
+        const mediaBase64 = String(req.body?.mediaBase64 || '').trim();
+        const mimeType = String(req.body?.mimeType || '').trim();
+        const fileName = String(req.body?.fileName || '').trim();
+        const caption = String(req.body?.caption || text || '').trim();
+
+        let result;
+        if (mediaBase64) {
+            result = await sendEvolutionMedia({
+                apiUrl: evo.apiUrl,
+                apiKey: evo.apiKey,
+                instance: evo.instance,
+                phone,
+                base64: mediaBase64,
+                mimeType,
+                fileName,
+                caption,
+            });
+        } else if (text) {
+            result = await sendEvolutionText({
+                apiUrl: evo.apiUrl,
+                apiKey: evo.apiKey,
+                instance: evo.instance,
+                phone,
+                text,
+            });
+        } else {
+            return res.status(400).json({ success: false, error: 'Informe "text" ou "mediaBase64"' });
+        }
+
+        if (!result?.ok) {
+            return res.status(502).json({ success: false, error: result?.error || 'Falha ao enviar mensagem' });
+        }
+
+        const key = `${tenantId}:${phone}`;
+        const session = anaSessions.get(key);
+        if (session) {
+            session.messages = Array.isArray(session.messages) ? session.messages : [];
+            session.messages.push({
+                role: 'assistant',
+                content: mediaBase64 ? `[midia] ${caption || fileName || mimeType || 'arquivo'}` : text,
+                at: new Date().toISOString(),
+                metadata: { manual: true },
+            });
+            session.lastActivityAt = new Date().toISOString();
+        }
+
+        return res.json({ success: true, tenantId, phone, instance: evo.instance });
     } catch (error) {
         handleError(res, error);
     }
@@ -979,6 +1256,17 @@ app.post('/webhook/whatsapp', async (req, res) => {
             return;
         }
 
+        const tenantId = tenant?.id || 'default';
+        const control = getContactControl(tenantId, phone);
+        if (control.blocked) {
+            log('INFO', 'Contato bloqueado: mensagem ignorada', { tenantId, phone, instanceName });
+            return;
+        }
+        if (control.paused) {
+            log('INFO', 'Agente pausado para contato: mensagem recebida sem resposta automatica', { tenantId, phone, instanceName });
+            return;
+        }
+
         const msg = payload.message || payload?.messages?.[0]?.message || {};
         const unwrapMessage = (m) =>
             m?.ephemeralMessage?.message
@@ -1014,7 +1302,6 @@ app.post('/webhook/whatsapp', async (req, res) => {
             return;
         }
 
-        const tenantId = tenant?.id || 'default';
         log('INFO', `WhatsApp recebido de ${phone}`, { tenantId, text: text.slice(0, 80), remoteJid, instanceName });
 
         const boundApiRequest = (environment, method, apiPath, body = null) =>
@@ -1059,6 +1346,10 @@ const apiOverview = () => ({
         pixStatus:       'GET  /api/payment/pix/:id/status',
         webhookPix:      'POST /webhook/pix',
         webhookWhatsApp: 'POST /webhook/whatsapp',
+        anaConversations:'GET  /api/ana/conversations',
+        anaContactCtrl:  'GET/POST /api/ana/contact-control',
+        anaSend:         'POST /api/ana/send',
+        conversasUI:     'GET  /conversas',
         totemUI:         'GET  /totem.html',
         lovableUI:       'GET  /lovable/',
     },
@@ -1088,6 +1379,12 @@ app.get('/api/frontend-build', (_req, res) => {
         jsEntry: scriptMatch ? scriptMatch[1] : null,
         cssEntry: cssMatch ? cssMatch[1] : null,
     });
+});
+
+app.get('/conversas', (_req, res) => {
+    const file = path.join(__dirname, 'public', 'conversas.html');
+    if (!fs.existsSync(file)) return res.status(404).send('Pagina de conversas nao encontrada');
+    return res.sendFile(file);
 });
 
 app.get('/', (_req, res) => {

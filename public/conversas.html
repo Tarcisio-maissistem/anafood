@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Conversas | AnaFood</title>
+  <style>
+    :root {
+      --bg: #0b141a;
+      --panel: #111b21;
+      --panel-soft: #202c33;
+      --line: #2a3942;
+      --text: #e9edef;
+      --muted: #8696a0;
+      --accent: #00a884;
+      --accent-soft: #103529;
+      --danger: #f15c6d;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: Segoe UI, Arial, sans-serif; }
+    .shell { height: 100vh; display: grid; grid-template-columns: 360px 1fr; }
+    .sidebar { border-right: 1px solid var(--line); display: flex; flex-direction: column; background: var(--panel); }
+    .topbar { background: var(--panel-soft); padding: 10px 12px; border-bottom: 1px solid var(--line); }
+    .row { display: flex; gap: 8px; align-items: center; }
+    input, select, button, textarea { background: #111; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+    button { cursor: pointer; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #04140f; font-weight: 600; }
+    button.ghost { background: transparent; }
+    .search { width: 100%; margin-top: 8px; }
+    .chat-list { overflow: auto; flex: 1; }
+    .chat-item { padding: 10px 12px; border-bottom: 1px solid #172026; cursor: pointer; }
+    .chat-item:hover, .chat-item.active { background: #182229; }
+    .chat-item .name { font-weight: 600; font-size: 14px; }
+    .chat-item .meta, .chat-item .preview { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .main { display: flex; flex-direction: column; background: #0f171d; }
+    .main-head { background: var(--panel-soft); border-bottom: 1px solid var(--line); padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .contact-title { font-weight: 700; }
+    .actions { display: flex; gap: 14px; align-items: center; }
+    .switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+    .messages { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; background-image: radial-gradient(rgba(255,255,255,0.02) 1px, transparent 1px); background-size: 20px 20px; }
+    .bubble { max-width: 72%; padding: 8px 10px; border-radius: 8px; font-size: 14px; line-height: 1.35; }
+    .bubble.user { background: #1f2c34; align-self: flex-start; }
+    .bubble.bot { background: var(--accent-soft); align-self: flex-end; border: 1px solid #1d4e3f; }
+    .bubble .at { color: var(--muted); font-size: 11px; margin-top: 4px; }
+    .composer { border-top: 1px solid var(--line); padding: 10px 12px; display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; align-items: center; background: var(--panel-soft); }
+    .composer textarea { min-height: 44px; max-height: 120px; resize: vertical; width: 100%; }
+    .hint { font-size: 12px; color: var(--muted); padding: 6px 12px; border-top: 1px dashed var(--line); }
+    .ok { color: #7de7be; }
+    .warn { color: #ffcd6b; }
+    .err { color: var(--danger); }
+    @media (max-width: 980px) {
+      .shell { grid-template-columns: 1fr; }
+      .sidebar { height: 42vh; }
+      .main { height: 58vh; }
+      .composer { grid-template-columns: 1fr auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="topbar">
+        <div class="row">
+          <input id="tenantId" placeholder="tenant_id (default)" value="default" style="flex:1" />
+          <input id="instanceName" placeholder="instancia (opcional)" style="flex:1" />
+          <button id="refreshBtn" class="ghost">Atualizar</button>
+        </div>
+        <input id="searchInput" class="search" placeholder="Buscar por telefone/mensagem..." />
+      </div>
+      <div id="chatList" class="chat-list"></div>
+    </aside>
+
+    <section class="main">
+      <header class="main-head">
+        <div>
+          <div id="contactTitle" class="contact-title">Selecione uma conversa</div>
+          <div id="contactMeta" class="hint" style="padding:0;border:0">Nenhum contato selecionado</div>
+        </div>
+        <div class="actions">
+          <label class="switch"><input id="pauseToggle" type="checkbox" /> Pausar agente</label>
+          <label class="switch"><input id="blockToggle" type="checkbox" /> Bloquear contato</label>
+        </div>
+      </header>
+
+      <div id="messages" class="messages"></div>
+
+      <div class="composer">
+        <textarea id="textInput" placeholder="Digite uma mensagem..."></textarea>
+        <input id="fileInput" type="file" style="display:none" />
+        <button id="attachBtn" class="ghost">Arquivo</button>
+        <button id="recordBtn" class="ghost">Gravar</button>
+        <button id="sendBtn" class="primary">Enviar</button>
+      </div>
+      <div id="statusBar" class="hint">Pronto para operar inbox. A pagina atualiza sozinha.</div>
+    </section>
+  </div>
+
+  <script src="/conversas.js"></script>
+</body>
+</html>
