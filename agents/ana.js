@@ -659,10 +659,11 @@ async function sendWhatsAppMessage(phone, text, runtime, remoteJid = null) {
   const rawPhone = String(phone || '').trim();
   const digitsPhone = rawPhone.replace(/\D/g, '');
   const numbers = Array.from(new Set([
-    String(remoteJid || '').trim(),
-    rawPhone,
-    digitsPhone,
     digitsPhone ? `${digitsPhone}@s.whatsapp.net` : '',
+    digitsPhone ? `${digitsPhone}@c.us` : '',
+    digitsPhone,
+    rawPhone,
+    String(remoteJid || '').trim(),
     digitsPhone ? `${digitsPhone}@lid` : '',
   ].filter(Boolean)));
 

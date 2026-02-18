@@ -205,11 +205,11 @@ const resolveCanonicalPhone = ({ tenantId, phone, remoteJid }) => {
     if (isLikelyPhoneDigits(p)) return p;
 
     const byJid = findSessionByRemoteJid(tenantId, remoteJid);
-    if (byJid?.phone) return normalizePhone(byJid.phone);
+    if (byJid?.phone && isLikelyPhoneDigits(byJid.phone)) return normalizePhone(byJid.phone);
 
-    if (p) return p;
     const fromJid = normalizePhone(String(remoteJid || '').split('@')[0] || '');
-    return fromJid;
+    if (isLikelyPhoneDigits(fromJid)) return fromJid;
+    return '';
 };
 
 const getContactKey = (tenantId, phone) => `${tenantId}:${normalizePhone(phone)}`;
@@ -244,10 +244,11 @@ const sendEvolutionText = async ({ apiUrl, apiKey, instance, phone, remoteJid, t
     const rawPhone = String(phone || '').trim();
     const digitsPhone = normalizePhone(rawPhone);
     const numbers = Array.from(new Set([
-        safeTrim(remoteJid),
-        rawPhone,
-        digitsPhone,
         digitsPhone ? `${digitsPhone}@s.whatsapp.net` : '',
+        digitsPhone ? `${digitsPhone}@c.us` : '',
+        digitsPhone,
+        rawPhone,
+        safeTrim(remoteJid),
         digitsPhone ? `${digitsPhone}@lid` : '',
     ].filter(Boolean)));
     const endpoints = [
@@ -292,10 +293,11 @@ const sendEvolutionMedia = async ({ apiUrl, apiKey, instance, phone, remoteJid, 
     const rawPhone = String(phone || '').trim();
     const digitsPhone = normalizePhone(rawPhone);
     const numbers = Array.from(new Set([
-        safeTrim(remoteJid),
-        rawPhone,
-        digitsPhone,
         digitsPhone ? `${digitsPhone}@s.whatsapp.net` : '',
+        digitsPhone ? `${digitsPhone}@c.us` : '',
+        digitsPhone,
+        rawPhone,
+        safeTrim(remoteJid),
         digitsPhone ? `${digitsPhone}@lid` : '',
     ].filter(Boolean)));
     const endpoints = [
@@ -1167,38 +1169,13 @@ app.get('/api/ana/conversations', (req, res) => {
             });
         }
 
-        const rowsBase = Array.from(merged.values())
+        const rows = Array.from(merged.values())
             .filter((c) => !search
                 || c.phone.includes(search)
                 || String(c?.name || '').toLowerCase().includes(search)
                 || String(c?.lastMessage?.content || '').toLowerCase().includes(search))
             .sort((a, b) => new Date(b.lastActivityAt || 0).getTime() - new Date(a.lastActivityAt || 0).getTime())
-            .slice(0, Math.max(limit * 2, limit));
-
-        // Collapse duplicate threads where same contact appears as @lid and @s.whatsapp.net.
-        const rows = [];
-        for (const row of rowsBase) {
-            const jid = String(row?.remoteJid || '').toLowerCase();
-            const isLid = jid.endsWith('@lid');
-            const nameKey = String(row?.name || '').trim().toLowerCase();
-            if (isLid && nameKey) {
-                const existing = rows.find((r) =>
-                    String(r?.name || '').trim().toLowerCase() === nameKey
-                    && !String(r?.remoteJid || '').toLowerCase().endsWith('@lid'));
-                if (existing) {
-                    if (!existing.lastActivityAt || new Date(row.lastActivityAt || 0).getTime() > new Date(existing.lastActivityAt || 0).getTime()) {
-                        existing.lastActivityAt = row.lastActivityAt || existing.lastActivityAt;
-                        existing.lastMessage = row.lastMessage || existing.lastMessage;
-                        existing.remoteJid = existing.remoteJid || row.remoteJid;
-                        existing.avatarUrl = existing.avatarUrl || row.avatarUrl;
-                    }
-                    continue;
-                }
-            }
-            rows.push(row);
-        }
-
-        const sliced = rows.slice(0, limit);
+            .slice(0, limit);
 
         return res.json({
             success: true,
@@ -1206,8 +1183,8 @@ app.get('/api/ana/conversations', (req, res) => {
             instance: resolvedInstance,
             configuredInstance: evo.instance,
             availableInstances,
-            count: sliced.length,
-            conversations: sliced,
+            count: rows.length,
+            conversations: rows,
         });
     };
 
@@ -1426,9 +1403,23 @@ app.delete('/api/ana/conversation', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Informe "phone" ou "remoteJid"' });
         }
 
-        const key = `${tenantId}:${phone}`;
-        const existed = anaSessions.has(key);
-        if (existed) anaSessions.delete(key);
+        let removedFromMemory = 0;
+        if (phone) {
+            const key = `${tenantId}:${phone}`;
+            if (anaSessions.has(key)) {
+                anaSessions.delete(key);
+                removedFromMemory += 1;
+            }
+        }
+        if (remoteJid) {
+            for (const [key, session] of anaSessions.entries()) {
+                if (String(session?.tenantId || 'default') !== tenantId) continue;
+                if (String(session?.remoteJid || '').trim().toLowerCase() === remoteJid.toLowerCase()) {
+                    anaSessions.delete(key);
+                    removedFromMemory += 1;
+                }
+            }
+        }
 
         const evo = getEvolutionConfig(tenant, req.query?.instance || null);
         const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
@@ -1446,7 +1437,7 @@ app.delete('/api/ana/conversation', async (req, res) => {
             tenantId,
             phone,
             remoteJid: jidToDelete,
-            removedFromMemory: existed,
+            removedFromMemory,
             evolutionDelete,
             instance: resolvedInstance,
         });

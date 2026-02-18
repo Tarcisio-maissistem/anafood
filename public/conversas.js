@@ -39,6 +39,7 @@
     instance: '',
     selectedPhone: '',
     selectedRemoteJid: '',
+    selectedConversationKey: '',
     selectedConversation: null,
     contactInfoOpen: false,
     conversations: [],
@@ -141,8 +142,9 @@
     syncContactPanelVisibility();
     ui.list.innerHTML = '';
     for (const conversation of state.conversations) {
+      const rowKey = String(conversation.remoteJid || conversation.phone || '');
       const item = document.createElement('div');
-      item.className = `item ${state.selectedPhone === conversation.phone ? 'active' : ''}`;
+      item.className = `item ${state.selectedConversationKey === rowKey ? 'active' : ''}`;
       const preview = escapeHtml((conversation.lastMessage && conversation.lastMessage.content) || 'Sem mensagens');
       item.innerHTML = `
         <div class="avatar">${initialsFromPhone(conversation.phone)}</div>
@@ -156,6 +158,7 @@
       item.onclick = async function () {
         state.selectedPhone = conversation.phone;
         state.selectedRemoteJid = conversation.remoteJid || `${conversation.phone}@s.whatsapp.net`;
+        state.selectedConversationKey = rowKey;
         state.selectedConversation = conversation;
         state.contactInfoOpen = false;
         renderList();
@@ -177,15 +180,17 @@
     }
 
     state.conversations = data.conversations || [];
-    if (state.selectedPhone) {
-      state.selectedConversation = state.conversations.find((c) => c.phone === state.selectedPhone) || state.selectedConversation;
+    if (state.selectedConversationKey) {
+      state.selectedConversation = state.conversations.find((c) => String(c.remoteJid || c.phone || '') === state.selectedConversationKey) || state.selectedConversation;
       if (state.selectedConversation && state.selectedConversation.remoteJid) {
         state.selectedRemoteJid = state.selectedConversation.remoteJid;
+        state.selectedPhone = state.selectedConversation.phone || state.selectedPhone;
       }
     }
-    if (state.selectedPhone && !state.conversations.some((c) => c.phone === state.selectedPhone)) {
+    if (state.selectedConversationKey && !state.conversations.some((c) => String(c.remoteJid || c.phone || '') === state.selectedConversationKey)) {
       state.selectedPhone = '';
       state.selectedRemoteJid = '';
+      state.selectedConversationKey = '';
     }
 
     renderList();
@@ -301,6 +306,7 @@
     setStatus('Conversa excluída com sucesso.', 'ok');
     state.selectedPhone = '';
     state.selectedRemoteJid = '';
+    state.selectedConversationKey = '';
     state.selectedConversation = null;
     state.contactInfoOpen = false;
     await loadConversations();
