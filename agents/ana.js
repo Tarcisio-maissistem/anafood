@@ -197,7 +197,7 @@ function tenantRuntime(tenant, runtimeOverrides = {}) {
     customPrompt: tenant?.agent?.customPrompt || '',
     model: tenant?.agent?.model || 'gpt-4o-mini',
     temperature: typeof tenant?.agent?.temperature === 'number' ? tenant.agent.temperature : 0.2,
-    bufferWindowMs: Number.isFinite(bufferWindowMs) ? Math.max(3000, Math.min(120000, bufferWindowMs)) : AGENT_DEFAULTS.bufferWindowMs,
+    bufferWindowMs: Number.isFinite(bufferWindowMs) ? Math.max(1000, Math.min(120000, bufferWindowMs)) : AGENT_DEFAULTS.bufferWindowMs,
     greetingMessage: greetingMessage || AGENT_DEFAULTS.greetingMessage,
     greetingOncePerDay: true,
     delivery: { requireAddress: tenant?.business?.restaurant?.requireAddress !== false },
@@ -247,7 +247,7 @@ function setAgentSettings(tenantId = 'default', patch = {}) {
   const current = getAgentSettings(tenantId);
   const next = {
     ...current,
-    bufferWindowMs: Math.max(3000, Math.min(120000, Number(patch.bufferWindowMs || current.bufferWindowMs || AGENT_DEFAULTS.bufferWindowMs))),
+    bufferWindowMs: Math.max(1000, Math.min(120000, Number(patch.bufferWindowMs || current.bufferWindowMs || AGENT_DEFAULTS.bufferWindowMs))),
     greetingMessage: cleanText(String(patch.greetingMessage || current.greetingMessage || AGENT_DEFAULTS.greetingMessage)),
     greetingOncePerDay: true,
   };
