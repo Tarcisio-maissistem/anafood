@@ -57,6 +57,11 @@ const cleanText = (t) => String(t || '').replace(/\s+/g, ' ').trim();
 const toNumberOrOne = (v) => { const n = parseInt(String(v || '').trim(), 10); return Number.isFinite(n) && n > 0 ? n : 1; };
 const detectYes = (t) => { const x = cleanText(t).toLowerCase(); return /^(sim|ok|isso|certo|confirmo|confirmar|fechado)$/.test(x) || x.includes('confirm'); };
 const detectNo = (t) => { const x = cleanText(t).toLowerCase(); return /^(nao|não|negativo|cancelar|cancela)$/.test(x) || x.includes('nao quero') || x.includes('não quero'); };
+const formatBRL = (n) => {
+  const v = Number(n || 0);
+  if (!Number.isFinite(v)) return 'R$ 0,00';
+  return `R$ ${v.toFixed(2).replace('.', ',')}`;
+};
 
 function ensureStateDir() { fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true }); }
 function persistStateDebounced() {
@@ -955,6 +960,24 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   return 'Nao entendi completamente. Pode me explicar de forma objetiva?';
 }
 
+function buildMenuReply(conversation, followUp = '') {
+  const menu = Array.isArray(conversation?.companyData?.menu) ? conversation.companyData.menu : [];
+  if (!menu.length) return '';
+  const categories = new Map();
+  for (const item of menu) {
+    const cat = cleanText(item?.category || 'Cardapio');
+    if (!categories.has(cat)) categories.set(cat, []);
+    categories.get(cat).push(item);
+  }
+  const sections = [];
+  for (const [cat, items] of categories.entries()) {
+    const top = items.slice(0, 8).map((i) => `- ${i.name}${Number(i.price || 0) > 0 ? ` (${formatBRL(i.price)})` : ''}`).join('\n');
+    sections.push(`*${cat}*\n${top}`);
+  }
+  const base = `🍽️ *Cardapio de hoje*\n\n${sections.slice(0, 4).join('\n\n')}`;
+  return followUp ? `${base}\n\n${followUp}` : base;
+}
+
 async function generatorAgent({ runtime, conversation, customer, classification, orchestratorResult, groupedText }) {
   const deterministic = {
     state: conversation.state,
@@ -1262,7 +1285,16 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       const followUp = fallbackText(runtime, followUpAction, conversation.transaction, orchestratorResult.missing || [], conversation);
       return followUp ? `${runtime.greetingMessage} ${followUp}`.trim() : runtime.greetingMessage;
     })()
-    : await generatorAgent({ runtime, conversation, customer, classification, orchestratorResult, groupedText: normalized.normalizedText || groupedText });
+    : (() => {
+      const text = normalized.normalizedText || groupedText;
+      const asksMenu = /\b(card[aá]pio|cardapio|menu|itens de hoje)\b/i.test(text || '');
+      if (asksMenu) {
+        const followUp = fallbackText(runtime, 'ASK_MISSING_FIELDS', conversation.transaction, orchestratorResult.missing || [], conversation);
+        const deterministicMenu = buildMenuReply(conversation, followUp);
+        if (deterministicMenu) return deterministicMenu;
+      }
+      return null;
+    })() || await generatorAgent({ runtime, conversation, customer, classification, orchestratorResult, groupedText: normalized.normalizedText || groupedText });
   if (conversation.state !== STATES.HUMAN_HANDOFF || !conversation.handoffNotified) {
     const sent = await sendWhatsAppMessage(conversation.phone, reply, runtime, conversation.remoteJid);
     if (sent && typeof onSend === 'function') {
