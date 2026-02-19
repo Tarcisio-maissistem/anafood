@@ -154,6 +154,30 @@
     .msg.assistant .bubble { background: var(--wa-bubble-out); border-top-right-radius: 0; }
     .at { position: absolute; right: 7px; bottom: 3px; font-size: 11px; color: #8696a0; }
 
+    /* ── Media / audio preview bar ── */
+    .preview-bar {
+      background: #f0f2f5; border-top: 1px solid #e4e8eb;
+      padding: 10px 16px; display: flex; align-items: center; gap: 10px;
+      flex-shrink: 0;
+    }
+    .preview-bar .preview-thumb {
+      width: 56px; height: 56px; object-fit: cover; border-radius: 8px; flex-shrink: 0;
+    }
+    .preview-bar .preview-label { flex: 1; font-size: 13px; color: #54656f; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .preview-bar .preview-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .audio-preview-bar audio { flex: 1; height: 36px; min-width: 0; }
+
+    /* ── Record button (in composer row) ── */
+    .mic-btn {
+      width: 44px; height: 44px; flex: 0 0 auto;
+      border: none; border-radius: 50%;
+      background: #ff7a1a; color: #fff;
+      cursor: pointer; display: grid; place-items: center;
+      position: relative;
+    }
+    .mic-btn.recording { background: #e53935; }
+    .mic-btn:hover { opacity: .9; }
+
     /* ── Composer ── */
     .composer {
       position: relative;
@@ -201,9 +225,9 @@
     }
     .emoji-menu {
       max-width: 300px; padding: 8px;
-      display: grid; grid-template-columns: repeat(8,1fr); gap: 3px;
       left: 60px; bottom: 66px;
     }
+    .emoji-menu.open { display: grid; grid-template-columns: repeat(8,1fr); gap: 3px; }
     .emoji-item {
       border: none; background: transparent;
       font-size: 22px; cursor: pointer;
@@ -457,6 +481,25 @@
       </div>
     </div>
 
+    <!-- Image preview bar (shown when image selected, before send) -->
+    <div id="mediaPreviewBar" class="preview-bar" style="display:none">
+      <img id="mediaPreviewImg" class="preview-thumb" src="" alt="preview" />
+      <span id="mediaPreviewName" class="preview-label"></span>
+      <div class="preview-actions">
+        <button id="cancelMediaBtn" class="btn">✖ Cancelar</button>
+        <button id="confirmMediaBtn" class="btn primary">✔ Enviar</button>
+      </div>
+    </div>
+
+    <!-- Audio preview bar (shown after recording, before send) -->
+    <div id="audioPreviewBar" class="preview-bar audio-preview-bar" style="display:none">
+      <audio id="audioPreviewPlayer" controls></audio>
+      <div class="preview-actions">
+        <button id="cancelAudioBtn" class="btn">✖ Cancelar</button>
+        <button id="confirmAudioBtn" class="btn primary">✔ Enviar</button>
+      </div>
+    </div>
+
     <!-- Composer (hidden until conversation selected) -->
     <div class="composer" id="composerBar" style="display:none">
       <button id="emojiBtn" class="icon-btn" title="Emoji">
@@ -473,13 +516,24 @@
         </svg>
       </button>
       <textarea id="textInput" placeholder="Digite uma mensagem" rows="1"></textarea>
+
+      <!-- Mic button (next to send) -->
+      <button id="recordBtn" class="mic-btn" title="Gravar áudio">
+        <svg id="recordIcon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="23"/>
+          <line x1="8" y1="23" x2="16" y2="23"/>
+        </svg>
+      </button>
+
       <button id="sendBtn" class="send-btn" title="Enviar">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="white">
           <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
         </svg>
       </button>
 
-      <!-- Attachment menu -->
+      <!-- Attachment menu (no audio – moved to mic button) -->
       <div id="attachMenu" class="pop attach-menu">
         <button type="button" id="pickDocumentBtn" class="attach-item">
           <span class="attach-dot" style="background:#7b61ff">
@@ -492,17 +546,6 @@
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5" fill="white" stroke="none"/><polyline points="21 15 16 10 5 21"/></svg>
           </span>
           Fotos e vídeos
-        </button>
-        <button type="button" id="recordBtn" class="attach-item">
-          <span class="attach-dot" style="background:#ff7a1a" id="recordDot">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-              <line x1="12" y1="19" x2="12" y2="23"/>
-              <line x1="8" y1="23" x2="16" y2="23"/>
-            </svg>
-          </span>
-          <span id="recordLabel">Áudio</span>
         </button>
         <button type="button" id="sendLocationBtn" class="attach-item">
           <span class="attach-dot" style="background:#00a884">

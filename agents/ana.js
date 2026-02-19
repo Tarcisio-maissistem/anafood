@@ -568,7 +568,9 @@ async function extractorAgent({ runtime, groupedText }) {
   const lower = groupedText.toLowerCase();
   const out = {
     mode: /retirada|retirar|balcao/.test(lower) ? 'TAKEOUT' : (/entrega|delivery/.test(lower) ? 'DELIVERY' : null),
-    payment: /pix/.test(lower) ? 'PIX' : (/(cartao|cartão|credito|debito)/.test(lower) ? 'CARD' : null),
+    payment: /pix/.test(lower) ? 'PIX'
+      : (/(cartao|cartão|cr[eé]dito|d[eé]bito)/.test(lower) ? 'CARD'
+      : (/dinheiro|especie|espécie|cash|nota/.test(lower) ? 'CASH' : null)),
     customer_name: null,
     notes: null,
     items: [],
@@ -868,6 +870,7 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
       conversation.transaction = { mode: '', customer_name: '', items: [], notes: '', address: { street_name: '', street_number: '', neighborhood: '', city: '', state: '', postal_code: '' }, payment: '', total_amount: 0, order_id: null };
       conversation.confirmed = {};
       conversation.pendingFieldConfirmation = null;
+      conversation.upsellDone = false;
       return { nextState: STATES.INIT, action: 'FLOW_CANCELLED', missing: [] };
     }
     if (conversation.pendingFieldConfirmation) {
@@ -886,6 +889,21 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
     }
 
     const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed);
+
+    // UPSELL: After items are set, suggest extras before collecting logistics (once per order)
+    const hasItems = Array.isArray(conversation.transaction.items) && conversation.transaction.items.length > 0;
+    if (
+      hasItems &&
+      missing.length &&
+      !missing.includes('items') &&       // items already filled
+      !conversation.upsellDone &&          // haven't upsold yet
+      i !== INTENTS.CANCELAMENTO &&
+      !yes && !no                          // not a confirmation response
+    ) {
+      conversation.upsellDone = true;
+      return { nextState: STATES.COLLECTING_DATA, action: 'UPSELL_SUGGEST', missing };
+    }
+
     if (missing.length && !conversation.pendingFieldConfirmation) {
       const firstMissing = missing[0];
       const hasValueForField = firstMissing === 'items'
@@ -1111,7 +1129,8 @@ function forceFillPendingField({ conversation, runtime, groupedText, extracted }
   }
   if (pendingField === 'payment') {
     if (/pix/i.test(text)) extracted.payment = 'PIX';
-    else if (/cart[aã]o|cartao|credito|debito|d[eé]bito/i.test(text)) extracted.payment = 'CARD';
+    else if (/cart[aã]o|cartao|cr[eé]dito|d[eé]bito/i.test(text)) extracted.payment = 'CARD';
+    else if (/dinheiro|especie|espécie|cash|nota/i.test(text)) extracted.payment = 'CASH';
     return;
   }
   if (pendingField.startsWith('address.')) {
@@ -1352,11 +1371,42 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
     return fallbackText(runtime, 'ASK_REPEAT_LAST_ORDER', tx, missing, conversation);
   }
 
+  if (action === 'UPSELL_SUGGEST') {
+    const itemLines = (tx.items || []).map((it) => `• ${it.quantity}x ${it.name}`).join('\n') || '—';
+    const mcp = conversation?.companyData || {};
+    const menu = Array.isArray(mcp.menu) ? mcp.menu : [];
+    const cartNorms = (tx.items || []).map((it) => normalizeForMatch(it.name));
+    const extras = menu
+      .filter((m) => m.available !== false && !cartNorms.includes(normalizeForMatch(m.name)))
+      .slice(0, 3)
+      .map((m) => m.name);
+    const suggestionLine = extras.length
+      ? `Deseja acrescentar algo? Temos também ${extras.join(', ')} 😋`
+      : 'Gostaria de acrescentar mais algum item ao pedido?';
+    return `${hi}anotei:\n${itemLines}\n\n${suggestionLine}`;
+  }
+
+  if (action === 'ANSWER_AND_CONFIRM') {
+    const itemLines = (tx.items || []).map((it) => `• ${it.quantity}x ${it.name}`).join('\n') || '—';
+    return `${hi}respondendo rapidinho e voltando ao seu pedido 😊\n\nItens:\n${itemLines}\n\nPosso confirmar o pedido?`;
+  }
+
   if (action === 'ORDER_REVIEW') {
-    const items = (tx.items || []).map((i) => `${i.quantity}x ${i.name}`).join('\n') || '-';
-    const mode = tx.mode === 'TAKEOUT' ? 'Retirada' : 'Delivery';
-    const payment = tx.payment === 'PIX' ? 'PIX' : (tx.payment === 'CARD' ? 'Cartão' : (tx.payment || '-'));
-    return `${hi}confere o seu pedido:\n\n${items}\n\n${mode} | ${payment}\n\nEstá tudo certo? 😊`;
+    const items = (tx.items || []).map((it) => {
+      const price = it.unit_price ? ` – ${formatBRL(it.unit_price / 100)}` : '';
+      return `• ${it.quantity}x ${it.name}${price}`;
+    }).join('\n') || '—';
+    const paymentMap = { PIX: 'PIX', CARD: 'Cartão', CASH: 'Dinheiro' };
+    const payment = paymentMap[tx.payment] || tx.payment || '—';
+    const mode = tx.mode === 'TAKEOUT' ? 'Retirada no local' : 'Delivery';
+    let addrLine = '';
+    if (tx.mode === 'DELIVERY' && cleanText(tx.address?.street_name)) {
+      const addrParts = [tx.address.street_name, tx.address.street_number, tx.address.neighborhood, tx.address.city].filter(Boolean);
+      addrLine = `\nEndereço: ${addrParts.join(', ')}`;
+    }
+    const total = (tx.items || []).reduce((sum, it) => sum + (Number(it.unit_price || 0) * Number(it.quantity || 1)), 0);
+    const totalLine = total > 0 ? `\n\nTotal: ${formatBRL(total / 100)}` : '';
+    return `${hi}aqui está o resumo do pedido 👇\n\nItens:\n${items}\n\nModalidade: ${mode}${addrLine}\nPagamento: ${payment}${totalLine}\n\nEstá tudo certo? 😊`;
   }
 
   if (action === 'CREATE_ORDER_AND_WAIT_PAYMENT') {
@@ -1536,18 +1586,29 @@ IDENTIDADE: Sempre se apresente como ${runtime.agentName}${companyName ? ` do ${
 
 PERSONALIDADE: Seja calorosa, empática e proativa. Use o nome do cliente quando souber (${customerFirstName ? `nome atual: ${customerFirstName}` : 'pergunte o nome se ainda não souber'}). Trate o cliente como pessoa, não como ticket.
 
+FLUXO DE VENDA (siga esta ordem):
+1. Receber item → confirmar o que foi pedido
+2. (action=UPSELL_SUGGEST) Sugerir complemento: bebida para prato, sobremesa, upgrade — nunca insistir
+3. Após o cliente indicar que não quer mais nada → perguntar retirada ou delivery
+4. Coletar endereço (só se delivery)
+5. Perguntar pagamento
+6. Apresentar resumo estruturado com itens em bullets, endereço, pagamento e total
+7. Pedir confirmação — SOMENTE por último
+
 REGRAS OBRIGATÓRIAS:
 - Respostas curtas e naturais (1-3 frases no máximo)
 - Uma pergunta ou ação por vez
 - Nunca invente preço, prazo ou regra que não esteja nos dados
 - Não repita informações já confirmadas
 - Se não entender um item, pergunte o nome exato como aparece no cardápio
-- Responda perguntas laterais e retome o fluxo na etapa pendente
+- Responda perguntas laterais e retome o fluxo na etapa pendente (action=ANSWER_AND_CONFIRM: responda E relembre o pedido)
 - Só peça endereço quando o modo for DELIVERY
 - Emojis com moderação (um por mensagem é suficiente)
-- Se o cliente estiver frustrado ou impaciente, reconheça com empatia antes de continuar
+- Se o cliente estiver frustrado, reconheça com empatia antes de continuar
+- (action=ORDER_REVIEW) Formatar resumo com bullets, separar itens / modalidade / endereço / pagamento / total em linhas separadas
 
-ESTILO: Use linguagem natural brasileira. Evite palavras robóticas como "processando", "registrado no sistema", "validando". Prefira "já anotei", "pode deixar", "tudo certo".
+ESTILO: Use linguagem natural brasileira. Evite palavras robóticas. Prefira "já anotei", "pode deixar", "tudo certo".
+No ORDER_REVIEW use quebras de linha reais entre seções — não coloque tudo numa linha só.
 
 DADOS DO ESTABELECIMENTO (use para responder qualquer pergunta sobre endereço, horário, pagamentos ou taxas):
 ${(() => {
@@ -1797,6 +1858,20 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     }
     forceFillPendingField({ conversation, runtime, groupedText: normalizedText, extracted });
     extracted.items = normalizeExtractedItemsWithCatalog(extracted.items || [], conversation.catalog || []);
+    // Remove unresolved duplicates: if an item with integration_code exists, drop similar items without code
+    {
+      const withCode = extracted.items.filter((it) => cleanText(it.integration_code));
+      if (withCode.length) {
+        extracted.items = extracted.items.filter((it) => {
+          if (cleanText(it.integration_code)) return true;
+          const normIt = normalizeForMatch(it.name);
+          return !withCode.some((c) => {
+            const normC = normalizeForMatch(c.name);
+            return normC.includes(normIt) || normIt.includes(normC);
+          });
+        });
+      }
+    }
   }
   log('INFO', 'Ana: classification/extraction', {
     tenantId: runtime.id,

@@ -26,8 +26,16 @@
     pickDocumentBtn:     document.getElementById('pickDocumentBtn'),
     pickMediaBtn:        document.getElementById('pickMediaBtn'),
     recordBtn:           document.getElementById('recordBtn'),
-    recordLabel:         document.getElementById('recordLabel'),
-    recordDot:           document.getElementById('recordDot'),
+    recordIcon:          document.getElementById('recordIcon'),
+    mediaPreviewBar:     document.getElementById('mediaPreviewBar'),
+    mediaPreviewImg:     document.getElementById('mediaPreviewImg'),
+    mediaPreviewName:    document.getElementById('mediaPreviewName'),
+    cancelMediaBtn:      document.getElementById('cancelMediaBtn'),
+    confirmMediaBtn:     document.getElementById('confirmMediaBtn'),
+    audioPreviewBar:     document.getElementById('audioPreviewBar'),
+    audioPreviewPlayer:  document.getElementById('audioPreviewPlayer'),
+    cancelAudioBtn:      document.getElementById('cancelAudioBtn'),
+    confirmAudioBtn:     document.getElementById('confirmAudioBtn'),
     sendLocationBtn:     document.getElementById('sendLocationBtn'),
     sendPixBtn:          document.getElementById('sendPixBtn'),
     sendMenuBtn:         document.getElementById('sendMenuBtn'),
@@ -74,6 +82,9 @@
     recorder: null,
     recordStream: null,
     audioChunks: [],
+    pendingAudioBlob: null,
+    pendingAudioMime: '',
+    pendingMediaFile: null,
     fileMode: 'document',
     agentSettings: { bufferWindowMs: 20000, greetingMessage: '' },
     isRecording: false,
@@ -498,8 +509,8 @@
 
   function setRecordingState(recording) {
     state.isRecording = recording;
-    ui.recordLabel.textContent = recording ? '⏹ Parar' : 'Áudio';
-    ui.recordDot.style.background = recording ? '#e53935' : '#ff7a1a';
+    ui.recordBtn.classList.toggle('recording', recording);
+    ui.recordBtn.title = recording ? 'Parar gravação' : 'Gravar áudio';
   }
 
   async function toggleRecording() {
@@ -534,22 +545,21 @@
       if (evt.data && evt.data.size > 0) state.audioChunks.push(evt.data);
     };
 
-    state.recorder.onstop = async () => {
+    state.recorder.onstop = () => {
       setRecordingState(false);
-      try {
-        const mime = state.recorder.mimeType || mimeType || 'audio/webm';
-        const blob = new Blob(state.audioChunks, { type: mime });
-        const ext  = extFromMime(mime);
-        const file = new File([blob], `audio-${Date.now()}.${ext}`, { type: mime });
-        await sendFile(file, 'audio');
-      } catch (err) {
-        setStatus(`Falha no envio de áudio: ${err.message}`, 'err');
-      } finally {
-        if (state.recordStream) {
-          state.recordStream.getTracks().forEach(t => t.stop());
-          state.recordStream = null;
-        }
+      if (state.recordStream) {
+        state.recordStream.getTracks().forEach(t => t.stop());
+        state.recordStream = null;
       }
+      const mime = state.recorder.mimeType || mimeType || 'audio/webm';
+      const blob = new Blob(state.audioChunks, { type: mime });
+      if (!blob.size) { setStatus('Gravação vazia.', 'warn'); return; }
+      state.pendingAudioBlob = blob;
+      state.pendingAudioMime = mime;
+      const objUrl = URL.createObjectURL(blob);
+      ui.audioPreviewPlayer.src = objUrl;
+      ui.audioPreviewBar.style.display = 'flex';
+      setStatus('Áudio gravado. Ouça e confirme para enviar.', 'ok');
     };
 
     state.recorder.start(200); // timeslice de 200ms garante ondataavailable
@@ -560,7 +570,16 @@
 
   async function sendLocationPrompt() {
     if (!state.selectedPhone) return setStatus('Selecione uma conversa.', 'warn');
-    const loc = window.prompt('Informe a localização (ex: https://maps.google.com/?q=-16.68,-49.25 ou endereço):');
+    try {
+      const data = await fetchJson(`/api/ana/mcp/company-data?tenant_id=${encodeURIComponent(state.tenantId)}`);
+      const address = String(data?.company?.address || '').trim();
+      if (address) {
+        const mapsLink = `https://maps.google.com/?q=${encodeURIComponent(address)}`;
+        await sendText(`📍 *Endereço:* ${address}\n🔗 ${mapsLink}`);
+        return;
+      }
+    } catch (_) { /* fallback para prompt manual */ }
+    const loc = window.prompt('Endereço não encontrado. Informe manualmente (ex: Rua das Flores, 123, Centro):');
     if (!loc) return;
     await sendText(`📍 Localização: ${loc}`);
   }
@@ -746,11 +765,59 @@
     ui.sendPixBtn.onclick      = () => { closeMenus(); sendPixPrompt().catch(e => setStatus(e.message, 'err')); };
     ui.sendMenuBtn.onclick     = () => { closeMenus(); sendMenuShortcut().catch(e => setStatus(e.message, 'err')); };
 
-    /* File input */
+    /* File input — imagem mostra preview, documento envia direto */
     ui.fileInput.onchange = () => {
       const file = ui.fileInput.files?.[0];
       if (!file) return;
-      sendFile(file).catch(e => setStatus(e.message, 'err')).finally(() => { ui.fileInput.value = ''; });
+      ui.fileInput.value = '';
+      if (state.fileMode === 'image' && file.type.startsWith('image/')) {
+        state.pendingMediaFile = file;
+        const objUrl = URL.createObjectURL(file);
+        ui.mediaPreviewImg.src = objUrl;
+        ui.mediaPreviewName.textContent = file.name;
+        ui.mediaPreviewBar.style.display = 'flex';
+        setStatus('Imagem selecionada. Confirme para enviar.', 'ok');
+      } else {
+        sendFile(file).catch(e => setStatus(e.message, 'err'));
+      }
+    };
+
+    /* Preview de mídia (imagem) */
+    ui.cancelMediaBtn.onclick = () => {
+      state.pendingMediaFile = null;
+      ui.mediaPreviewImg.src = '';
+      ui.mediaPreviewBar.style.display = 'none';
+      setStatus('Envio cancelado.', '');
+    };
+    ui.confirmMediaBtn.onclick = () => {
+      const file = state.pendingMediaFile;
+      if (!file) return;
+      state.pendingMediaFile = null;
+      ui.mediaPreviewBar.style.display = 'none';
+      sendFile(file, 'image').catch(e => setStatus(e.message, 'err'));
+    };
+
+    /* Preview de áudio */
+    ui.cancelAudioBtn.onclick = () => {
+      state.pendingAudioBlob = null;
+      state.pendingAudioMime = '';
+      if (ui.audioPreviewPlayer.src) URL.revokeObjectURL(ui.audioPreviewPlayer.src);
+      ui.audioPreviewPlayer.src = '';
+      ui.audioPreviewBar.style.display = 'none';
+      setStatus('Gravação descartada.', '');
+    };
+    ui.confirmAudioBtn.onclick = () => {
+      const blob = state.pendingAudioBlob;
+      const mime = state.pendingAudioMime || 'audio/webm';
+      if (!blob) return;
+      state.pendingAudioBlob = null;
+      state.pendingAudioMime = '';
+      if (ui.audioPreviewPlayer.src) URL.revokeObjectURL(ui.audioPreviewPlayer.src);
+      ui.audioPreviewPlayer.src = '';
+      ui.audioPreviewBar.style.display = 'none';
+      const ext  = extFromMime(mime);
+      const file = new File([blob], `audio-${Date.now()}.${ext}`, { type: mime });
+      sendFile(file, 'audio').catch(e => setStatus(e.message, 'err'));
     };
 
     /* Load-more history when scrolled to top */
