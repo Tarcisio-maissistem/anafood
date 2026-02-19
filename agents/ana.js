@@ -63,6 +63,77 @@ const formatBRL = (n) => {
   return `R$ ${v.toFixed(2).replace('.', ',')}`;
 };
 
+const normalizeStateUF = (value) => {
+  const raw = cleanText(value).toUpperCase();
+  if (!raw) return '';
+  if (/^[A-Z]{2}$/.test(raw)) return raw;
+  const map = {
+    GOIAS: 'GO',
+    GOIÁS: 'GO',
+    SAO PAULO: 'SP',
+    SÃO PAULO: 'SP',
+    RIO DE JANEIRO: 'RJ',
+    MINAS GERAIS: 'MG',
+    PARANA: 'PR',
+    PARANÁ: 'PR',
+    SANTA CATARINA: 'SC',
+    RIO GRANDE DO SUL: 'RS',
+    DISTRITO FEDERAL: 'DF',
+  };
+  return map[raw] || '';
+};
+
+function extractAddressFromText(text) {
+  const raw = String(text || '');
+  const lower = raw.toLowerCase();
+  const out = {};
+
+  const streetMatch = raw.match(/\b(rua|av(?:enida)?|alameda|travessa|quadra|qd)\s+([^,]+)/i);
+  if (streetMatch) out.street_name = cleanText(`${streetMatch[1]} ${streetMatch[2]}`);
+
+  if (/\b(sem\s*n[uú]mero|s\/n)\b/i.test(raw)) out.street_number = 'S/N';
+  const numberMatch = raw.match(/\b(?:n(?:[úu]mero)?|num|casa)\s*[:#-]?\s*([0-9]{1,6}|s\/n)\b/i);
+  if (!out.street_number && numberMatch) out.street_number = String(numberMatch[1]).toUpperCase() === 'S/N' ? 'S/N' : cleanText(numberMatch[1]);
+  if (!out.street_number && /\b0\b/.test(lower) && /(n[uú]mero|num|casa|sem numero)/i.test(raw)) out.street_number = 'S/N';
+
+  const neighborhoodMatch = raw.match(/\b(?:bairro|setor|jd|jardim|parque)\s+([^,]+)/i);
+  if (neighborhoodMatch) {
+    const prefix = /\b(jd|jardim|parque|setor)\b/i.exec(neighborhoodMatch[0]);
+    out.neighborhood = cleanText(prefix ? `${prefix[0]} ${neighborhoodMatch[1]}` : neighborhoodMatch[1]);
+  }
+
+  const cityUfSlash = raw.match(/\b([A-Za-zÀ-ÿ\s]+)\s*\/\s*([A-Za-z]{2})\b/);
+  if (cityUfSlash) {
+    out.city = cleanText(cityUfSlash[1]);
+    out.state = normalizeStateUF(cityUfSlash[2]);
+  } else {
+    const cityUfInline = raw.match(/\b([A-Za-zÀ-ÿ\s]+)\s+([A-Za-z]{2})\b$/);
+    if (cityUfInline) {
+      out.city = cleanText(cityUfInline[1]);
+      out.state = normalizeStateUF(cityUfInline[2]);
+    }
+  }
+
+  const cep = raw.match(/\b\d{5}-?\d{3}\b|\b\d{8}\b/);
+  if (cep) out.postal_code = String(cep[0]).replace(/\D/g, '');
+
+  return out;
+}
+
+function enrichAddressWithCompanyDefaults(conversation) {
+  const addr = conversation?.transaction?.address || {};
+  const companyAddress = cleanText(conversation?.companyData?.company?.address || '');
+  if (!companyAddress) return;
+
+  if (!cleanText(addr.city) || !cleanText(addr.state)) {
+    const m = companyAddress.match(/\b([A-Za-zÀ-ÿ\s]+)\s*\/\s*([A-Za-z]{2})\b/);
+    if (m) {
+      if (!cleanText(addr.city)) addr.city = cleanText(m[1]);
+      if (!cleanText(addr.state)) addr.state = normalizeStateUF(m[2]);
+    }
+  }
+}
+
 function ensureStateDir() { fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true }); }
 function persistStateDebounced() {
   if (persistTimer) return;
@@ -385,8 +456,7 @@ async function extractorAgent({ runtime, groupedText }) {
   const obsMatch = groupedText.match(/(?:obs|observa(?:ç|c)[aã]o|complemento)\s*[:\-]\s*(.{3,200})/i);
   if (obsMatch) out.notes = cleanText(obsMatch[1]);
 
-  const cep = groupedText.match(/\b\d{8}\b/);
-  if (cep) out.address.postal_code = cep[0];
+  Object.assign(out.address, extractAddressFromText(groupedText));
 
   for (const m of groupedText.matchAll(/(\d+)\s+([\p{L}0-9\s-]{3,40})/gu)) {
     const name = cleanText(m[2]).replace(/(para entrega|delivery|retirada|no pix|no cartao)$/i, '').trim();
@@ -473,7 +543,7 @@ function restaurantMissingFields(runtime, tx, confirmed = {}) {
   if (Array.isArray(tx.items) && tx.items.some((i) => !Number(i.quantity) || Number(i.quantity) <= 0)) missing.push('items');
   if (!tx.mode) missing.push('mode');
   if (tx.mode === 'DELIVERY' && runtime.delivery.requireAddress) {
-    for (const f of ['street_name', 'street_number', 'neighborhood', 'city', 'state', 'postal_code']) {
+    for (const f of ['street_name', 'street_number', 'neighborhood']) {
       if (!cleanText(tx.address?.[f])) missing.push(`address.${f}`);
     }
   }
@@ -594,6 +664,7 @@ function applySnapshotToConversation(conversation, snapshot) {
 
 function orchestrate({ runtime, conversation, customer, classification, extracted, groupedText }) {
   if (runtime.segment === 'restaurant') mergeRestaurantTransaction(conversation, extracted || {});
+  if (runtime.segment === 'restaurant') enrichAddressWithCompanyDefaults(conversation);
   if (runtime.segment === 'restaurant') conversation.pendingFieldConfirmation = null;
 
   const handoff = classification.handoff
@@ -1304,6 +1375,20 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     conversation.consecutiveFailures = 0;
   }
 
+  const deterministicActions = new Set([
+    'ASK_MISSING_FIELDS',
+    'ASK_FIELD_CONFIRMATION',
+    'ANSWER_AND_RESUME',
+    'ANSWER_AND_RESUME_CONFIRM',
+    'ANSWER_AND_RESUME_REPEAT',
+    'ASK_REPEAT_LAST_ORDER',
+    'ORDER_REVIEW',
+    'ASK_CONFIRMATION',
+    'REQUEST_ADJUSTMENTS',
+    'PAYMENT_REMINDER',
+    'FLOW_CANCELLED',
+  ]);
+
   const reply = orchestratorResult.action === 'WELCOME'
     ? (() => {
       const firstMissing = (orchestratorResult.missing || [])[0];
@@ -1323,6 +1408,9 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
         const followUp = fallbackText(runtime, 'ASK_MISSING_FIELDS', conversation.transaction, orchestratorResult.missing || [], conversation);
         const deterministicMenu = buildMenuReply(conversation, followUp);
         if (deterministicMenu) return deterministicMenu;
+      }
+      if (deterministicActions.has(orchestratorResult.action)) {
+        return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing || [], conversation);
       }
       return null;
     })() || await generatorAgent({ runtime, conversation, customer, classification, orchestratorResult, groupedText: normalized.normalizedText || groupedText });
