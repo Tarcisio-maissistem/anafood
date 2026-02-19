@@ -38,6 +38,17 @@
         "instance": "Teste03"
       },
       "integrations": {
+        "supabase": {
+          "url": "${SUPABASE_URL}",
+          "serviceRoleKey": "${SUPABASE_SERVICE_ROLE_KEY}",
+          "companyId": "${COMPANY_MCP_COMPANY_ID}",
+          "companyTable": "companies",
+          "companyLookupKey": "id",
+          "menuTable": "products",
+          "paymentTable": "payment_methods",
+          "deliveryTable": "delivery_fees",
+          "tenantFilterKey": "company_id"
+        },
         "anafood": {
           "endpoint": "${ANAFOOD_API_URL}",
           "authMode": "company_key",

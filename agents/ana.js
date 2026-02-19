@@ -130,10 +130,14 @@ function tenantRuntime(tenant, runtimeOverrides = {}) {
     supabase: {
       url: tenant?.integrations?.supabase?.url || process.env.SUPABASE_URL || '',
       serviceRoleKey: tenant?.integrations?.supabase?.serviceRoleKey || process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+      companyId: tenant?.integrations?.supabase?.companyId || process.env.COMPANY_MCP_COMPANY_ID || '',
+      companyTable: tenant?.integrations?.supabase?.companyTable || process.env.COMPANY_MCP_COMPANY_TABLE || 'companies',
+      companyLookupKey: tenant?.integrations?.supabase?.companyLookupKey || process.env.COMPANY_MCP_COMPANY_LOOKUP_KEY || 'id',
       menuTable: tenant?.integrations?.supabase?.menuTable || process.env.COMPANY_MCP_MENU_TABLE || '',
       paymentTable: tenant?.integrations?.supabase?.paymentTable || process.env.COMPANY_MCP_PAYMENT_TABLE || '',
       deliveryTable: tenant?.integrations?.supabase?.deliveryTable || process.env.COMPANY_MCP_DELIVERY_TABLE || '',
-      tenantFilterKey: tenant?.integrations?.supabase?.tenantFilterKey || process.env.COMPANY_MCP_TENANT_FILTER_KEY || 'tenant_id',
+      tenantFilterKey: tenant?.integrations?.supabase?.tenantFilterKey || process.env.COMPANY_MCP_TENANT_FILTER_KEY || 'company_id',
+      filterValue: tenant?.integrations?.supabase?.filterValue || process.env.COMPANY_MCP_FILTER_VALUE || '',
     },
     anafood: {
       endpoint: tenant?.integrations?.anafood?.endpoint || process.env.ANAFOOD_API_URL || '',
