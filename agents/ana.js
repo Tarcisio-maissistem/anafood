@@ -466,6 +466,7 @@ function extractItemsFromFreeText(text) {
   for (let chunk of chunks) {
     if (/^(oi|ola|olá|bom dia|boa tarde|boa noite)$/i.test(chunk)) continue;
     if (/\b(rua|av(?:enida)?|bairro|cep|numero|n[úu]mero|pix|cart[aã]o|retirada|delivery)\b/i.test(chunk)) continue;
+    if (/\b(horario|horário|funcionamento|endereco|endereço|taxa|taxas|cardapio|cardápio|preço|preco|quanto custa|quanto fica|como funciona|qual é|qual e|quais s[aã]o|informacao|informação)\b/i.test(chunk)) continue;
 
     let quantity = 1;
     const qtyPrefix = chunk.match(/^\s*(\d+|um|uma|dois|duas|tres|quatro|cinco)\b/i);
@@ -770,7 +771,13 @@ function applySnapshotToConversation(conversation, snapshot) {
 }
 
 function orchestrate({ runtime, conversation, customer, classification, extracted, groupedText }) {
-  if (runtime.segment === 'restaurant') mergeRestaurantTransaction(conversation, extracted || {});
+  if (runtime.segment === 'restaurant') {
+    // Don't add items from consultation messages – avoids sentences like "Qual o horário?" becoming order items
+    const mergeExtracted = (classification.intent === INTENTS.CONSULTA)
+      ? { ...extracted, items: [] }
+      : (extracted || {});
+    mergeRestaurantTransaction(conversation, mergeExtracted);
+  }
   if (runtime.segment === 'restaurant') enrichAddressWithCompanyDefaults(conversation);
   if (runtime.segment === 'restaurant') conversation.pendingFieldConfirmation = null;
 
@@ -905,6 +912,8 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
     if (yes) return conversation.transaction.payment === 'PIX'
       ? { nextState: STATES.WAITING_PAYMENT, action: 'CREATE_ORDER_AND_WAIT_PAYMENT', missing: [] }
       : { nextState: STATES.CONFIRMED, action: 'CREATE_ORDER_AND_CONFIRM', missing: [] };
+    // Consultation question while waiting confirmation: answer then re-ask
+    if (i === INTENTS.CONSULTA || hasQuestion) return { nextState: STATES.WAITING_CONFIRMATION, action: 'ANSWER_AND_CONFIRM', missing: [] };
     return { nextState: STATES.WAITING_CONFIRMATION, action: 'ASK_CONFIRMATION', missing: [] };
   }
 
@@ -1540,7 +1549,27 @@ REGRAS OBRIGATÓRIAS:
 
 ESTILO: Use linguagem natural brasileira. Evite palavras robóticas como "processando", "registrado no sistema", "validando". Prefira "já anotei", "pode deixar", "tudo certo".
 
-Use companyMcp para responder sobre horário, endereço, cardápio, pagamentos e taxas de entrega.
+DADOS DO ESTABELECIMENTO (use para responder qualquer pergunta sobre endereço, horário, pagamentos ou taxas):
+${(() => {
+  const mcp = conversation.companyData || {};
+  const ctx = runtime.companyContext || {};
+  const addr = cleanText(mcp.company?.address || ctx.address || '');
+  const hours = cleanText(mcp.company?.openingHours || ctx.openingHours || '');
+  const payments = Array.from(new Set([
+    ...(Array.isArray(mcp.paymentMethods) ? mcp.paymentMethods : []),
+    ...(Array.isArray(ctx.paymentMethods) ? ctx.paymentMethods : []),
+  ])).filter(Boolean);
+  const delivery = Array.isArray(mcp.deliveryAreas) && mcp.deliveryAreas.length
+    ? mcp.deliveryAreas
+    : (Array.isArray(ctx.deliveryAreas) ? ctx.deliveryAreas : []);
+  const lines = [
+    addr   ? `- Endereço: ${addr}` : '- Endereço: não cadastrado',
+    hours  ? `- Horário: ${hours}` : '- Horário: não cadastrado',
+    payments.length ? `- Formas de pagamento: ${payments.join(', ')}` : '- Formas de pagamento: não cadastradas',
+    delivery.length ? `- Taxas de entrega: ${delivery.map(a => `${a.neighborhood || a} (${formatBRL(a.fee || 0)})`).join('; ')}` : '- Taxas de entrega: não cadastradas',
+  ];
+  return lines.join('\n');
+})()}
 ${runtime.customPrompt ? `\nINSTRUÇÕES ESPECÍFICAS DO ESTABELECIMENTO:\n${runtime.customPrompt}` : ''}`,
         },
         {

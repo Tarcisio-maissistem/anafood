@@ -44,6 +44,16 @@
     clearContextPhone:   document.getElementById('clearContextPhone'),
     cancelClearBtn:      document.getElementById('cancelClearBtn'),
     confirmClearBtn:     document.getElementById('confirmClearBtn'),
+    contactInfoBtn:      document.getElementById('contactInfoBtn'),
+    contactPanel:        document.getElementById('contactPanel'),
+    closeContactPanel:   document.getElementById('closeContactPanel'),
+    panelAvatar:         document.getElementById('panelAvatar'),
+    panelName:           document.getElementById('panelName'),
+    panelPhone:          document.getElementById('panelPhone'),
+    panelState:          document.getElementById('panelState'),
+    panelPhoneDetail:    document.getElementById('panelPhoneDetail'),
+    panelStateDetail:    document.getElementById('panelStateDetail'),
+    deleteConversationBtn: document.getElementById('deleteConversationBtn'),
   };
 
   /* ── App state ── */
@@ -166,6 +176,46 @@
     ui.chatHeader.style.display        = show ? 'flex' : 'none';
     ui.messages.style.display          = show ? 'block' : 'none';
     ui.composerBar.style.display       = show ? 'flex' : 'none';
+    if (!show) ui.contactPanel.classList.remove('open');
+  }
+
+  /* ── Contact side panel ── */
+  function openContactPanel() {
+    const conv = state.selectedConversation || {};
+    const name = displayName(conv);
+    const phone = state.selectedPhone || conv.phone || '—';
+    const convState = ui.contactState.textContent || '—';
+
+    ui.panelName.textContent = name;
+    ui.panelPhone.textContent = phone;
+    ui.panelPhoneDetail.textContent = phone;
+    ui.panelStateDetail.textContent = convState;
+    ui.panelState.textContent = '';
+
+    // Render avatar
+    renderAvatar(ui.panelAvatar, conv);
+
+    ui.contactPanel.classList.add('open');
+
+    // Try to fetch profile picture if not already set
+    if (!conv.avatarUrl && phone && phone !== '—') {
+      fetch(`/api/ana/profile-picture?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(phone)}`)
+        .then(r => r.ok ? r.json() : {})
+        .then(data => {
+          const url = (data?.url || '').trim();
+          if (url && state.selectedConversation) {
+            state.selectedConversation.avatarUrl = url;
+            renderAvatar(ui.panelAvatar, state.selectedConversation);
+            renderAvatar(ui.contactProfile, state.selectedConversation);
+            renderList();
+          }
+        })
+        .catch(() => {});
+    }
+  }
+
+  function closeContactPanel() {
+    ui.contactPanel.classList.remove('open');
   }
 
   /* ══════════════════════ API ══════════════════════ */
@@ -619,6 +669,17 @@
     };
     ui.blockToggle.onchange = () => {
       updateControl({ blocked: ui.blockToggle.checked }).catch(e => setStatus(e.message, 'err'));
+    };
+
+    /* Contact info panel */
+    ui.contactInfoBtn.onclick = () => openContactPanel();
+    ui.closeContactPanel.onclick = () => closeContactPanel();
+    ui.deleteConversationBtn.onclick = () => {
+      if (!state.selectedPhone) return;
+      const label = displayName(state.selectedConversation || { phone: state.selectedPhone });
+      if (!confirm(`Excluir a conversa de ${label}? Esta ação vai limpar o contexto e a memória do contato.`)) return;
+      closeContactPanel();
+      clearContextAndMemory().catch(e => setStatus(e.message, 'err'));
     };
 
     /* Clear context */

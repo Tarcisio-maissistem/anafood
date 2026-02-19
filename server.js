@@ -1342,6 +1342,52 @@ app.get('/api/ana/conversations', (req, res) => {
 });
 
 /**
+ * GET /api/ana/profile-picture
+ * Fetches WhatsApp profile picture URL for a contact via Evolution API.
+ * Query: phone (obrigatorio), tenant_id?, instance?
+ */
+app.get('/api/ana/profile-picture', (req, res) => {
+    const tenant = resolveTenant({
+        tenantId: req.query?.tenant_id || null,
+        instanceName: req.query?.instance || null,
+    });
+    const requestedPhone = normalizeCanonicalPhone(req.query?.phone || '');
+    if (!requestedPhone) return res.status(400).json({ success: false, error: 'Parametro "phone" obrigatorio' });
+    const evo = getEvolutionConfig(tenant, req.query?.instance || null);
+
+    const run = async () => {
+        const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
+        const instance = pickBestEvolutionInstance(evo.instance, availableInstances);
+        if (!evo.apiUrl || !evo.apiKey || !instance) return res.json({ success: true, url: '' });
+
+        const endpoints = [
+            { method: 'POST', url: `${evo.apiUrl}/chat/fetchProfilePictureUrl/${instance}`, body: { number: requestedPhone } },
+            { method: 'GET',  url: `${evo.apiUrl}/chat/fetchProfilePictureUrl/${instance}?number=${encodeURIComponent(requestedPhone)}` },
+            { method: 'POST', url: `${evo.apiUrl}/chat/fetchProfilePicture/${instance}`,    body: { number: requestedPhone } },
+        ];
+
+        for (const call of endpoints) {
+            try {
+                const r = await fetch(call.url, {
+                    method: call.method,
+                    headers: { apikey: evo.apiKey, Authorization: `Bearer ${evo.apiKey}`, 'Content-Type': 'application/json' },
+                    ...(call.method !== 'GET' ? { body: JSON.stringify(call.body) } : {}),
+                });
+                if (!r.ok) continue;
+                const data = await r.json().catch(() => ({}));
+                const url = safeTrim(
+                    data?.profilePictureUrl || data?.profilePicUrl || data?.picture ||
+                    data?.url || data?.imgUrl || data?.image || ''
+                );
+                if (url) return res.json({ success: true, url });
+            } catch (_) {}
+        }
+        return res.json({ success: true, url: '' });
+    };
+    run().catch((e) => handleError(res, e));
+});
+
+/**
  * GET /api/ana/messages
  * Query: phone (obrigatorio), tenant_id?, instance?, limit?
  */
