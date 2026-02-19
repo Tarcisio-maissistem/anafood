@@ -6,7 +6,7 @@ const { OpenAI } = require('openai');
 const { loadCompanyData } = require('../lib/company-data-mcp');
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
-const BUFFER_WINDOW_MS = Number(process.env.MESSAGE_BUFFER_MS || 20000);
+const BUFFER_WINDOW_MS = Number(process.env.MESSAGE_BUFFER_MS || 1000);
 const SESSION_TTL = Number(process.env.CONVERSATION_TTL_MS || 60 * 60 * 1000);
 const SUMMARY_EVERY_N_MESSAGES = Number(process.env.SUMMARY_EVERY_N_MESSAGES || 8);
 
@@ -405,6 +405,9 @@ async function normalizeMessageBlock({ rawText, rawMessage }) {
 async function classifierAgent({ runtime, conversation, groupedText }) {
   const lower = groupedText.toLowerCase();
   if (/atendente|humano|pessoa/.test(lower)) return { intent: INTENTS.HUMANO, requires_extraction: false, handoff: true, confidence: 1 };
+  if (/\b(horario|funcionamento|endereco|endereço|pagamento|formas de pagamento|valor|pre[cç]o|card[aá]pio|cardapio|menu)\b/.test(lower)) {
+    return { intent: INTENTS.CONSULTA, requires_extraction: false, handoff: false, confidence: 0.95 };
+  }
   const hasOrderSignal = /quero|pedido|comprar|marmita|pizza|lanche|agendar|marcar/.test(lower);
   const hasGreetingSignal = /oi|ola|olá|bom dia|boa tarde|boa noite/.test(lower);
   if (hasOrderSignal) return { intent: INTENTS.NOVO_PEDIDO, requires_extraction: true, handoff: false, confidence: hasGreetingSignal ? 0.9 : 0.8 };
@@ -1080,6 +1083,56 @@ function buildMenuReply(conversation, followUp = '') {
   return followUp ? `${base}\n\n${followUp}` : base;
 }
 
+function buildContextualAnswer(conversation, userMessage = '') {
+  const text = cleanText(userMessage).toLowerCase();
+  const mcp = conversation?.companyData || {};
+  const company = mcp?.company || {};
+  const menu = Array.isArray(mcp?.menu) ? mcp.menu : [];
+  const payments = Array.isArray(mcp?.paymentMethods) ? mcp.paymentMethods : [];
+  const deliveryAreas = Array.isArray(mcp?.deliveryAreas) ? mcp.deliveryAreas : [];
+
+  if (/\b(endereco|endereço|localiza[cç][aã]o)\b/.test(text)) {
+    const address = cleanText(company.address || '');
+    if (address) return `Nosso endereço é: ${address}.`;
+    return 'Posso te passar o endereço assim que estiver cadastrado no sistema.';
+  }
+
+  if (/\b(horario|funcionamento|abre|fecha)\b/.test(text)) {
+    const opening = cleanText(company.openingHours || '');
+    if (opening) return `Nosso horário de funcionamento é: ${opening}.`;
+    return 'Ainda não tenho o horário cadastrado no sistema.';
+  }
+
+  if (/\b(pagamento|formas de pagamento|pix|cart[aã]o|dinheiro)\b/.test(text)) {
+    if (payments.length) return `Trabalhamos com: ${payments.join(', ')}.`;
+    return 'No momento não encontrei as formas de pagamento no cadastro da empresa.';
+  }
+
+  if (/\b(valor|pre[cç]o|quanto|marmita grande|marmita pequena|card[aá]pio|cardapio|menu)\b/.test(text)) {
+    if (!menu.length) return 'No momento não encontrei o cardápio cadastrado no banco de dados.';
+    const sizeHint = text.includes('grande') ? 'grande' : (text.includes('pequena') ? 'pequena' : '');
+    if (sizeHint) {
+      const item = menu.find((i) => String(i?.name || '').toLowerCase().includes(sizeHint));
+      if (item && Number(item.price || 0) > 0) return `A opção ${item.name} está por ${formatBRL(item.price)}.`;
+    }
+    const priced = menu.filter((i) => Number(i.price || 0) > 0).slice(0, 4);
+    if (priced.length) {
+      return `Alguns valores do cardápio: ${priced.map((i) => `${i.name} (${formatBRL(i.price)})`).join(', ')}.`;
+    }
+    return 'Encontrei o cardápio, mas sem preços preenchidos.';
+  }
+
+  if (/\b(entrega|delivery|bairro|taxa)\b/.test(text)) {
+    if (deliveryAreas.length) {
+      const sample = deliveryAreas.slice(0, 5).map((a) => `${a.neighborhood} (${formatBRL(a.fee)})`).join(', ');
+      return `Entregamos em: ${sample}.`;
+    }
+    return 'Ainda não encontrei as áreas de entrega cadastradas.';
+  }
+
+  return '';
+}
+
 async function generatorAgent({ runtime, conversation, customer, classification, orchestratorResult, groupedText }) {
   const deterministic = {
     state: conversation.state,
@@ -1410,6 +1463,16 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
         if (deterministicMenu) return deterministicMenu;
       }
       if (deterministicActions.has(orchestratorResult.action)) {
+        if (orchestratorResult.action === 'ANSWER_AND_RESUME' || orchestratorResult.action === 'ANSWER_AND_RESUME_CONFIRM' || orchestratorResult.action === 'ANSWER_AND_RESUME_REPEAT') {
+          const contextual = buildContextualAnswer(conversation, text);
+          if (contextual) {
+            const followAction = orchestratorResult.action === 'ANSWER_AND_RESUME_CONFIRM'
+              ? 'ASK_FIELD_CONFIRMATION'
+              : (orchestratorResult.action === 'ANSWER_AND_RESUME_REPEAT' ? 'ASK_REPEAT_LAST_ORDER' : 'ASK_MISSING_FIELDS');
+            const follow = fallbackText(runtime, followAction, conversation.transaction, orchestratorResult.missing || [], conversation);
+            return `${contextual} ${follow}`.trim();
+          }
+        }
         return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing || [], conversation);
       }
       return null;
