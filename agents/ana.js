@@ -1085,10 +1085,16 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   if (action === 'ANSWER_AND_RESUME') {
     const lastUser = cleanText(conversation?.messages?.slice(-1)?.[0]?.content || '').toLowerCase();
     if (/^ja (falei|informei)|^já (falei|informei)/.test(lastUser)) {
-      return 'Entendi. Para eu continuar sem erro, me passe os itens no formato: "1 prato do dia e 1 coca cola lata".';
+      const first = (missing || [])[0];
+      if (first === 'items') return 'Entendi. Para registrar corretamente, me passe os itens no formato: "1 prato do dia e 1 coca cola lata".';
+      if (first === 'address.street_name') return 'Entendi. Rua anotada. Agora me informe só o número da casa.';
+      if (first === 'address.street_number') return 'Perfeito. Agora preciso apenas do número da casa para concluir o endereço.';
+      if (first === 'address.neighborhood') return 'Perfeito. Agora me informe somente o bairro.';
+      if (first === 'payment') return 'Entendi. Agora confirme a forma de pagamento: PIX, dinheiro, cartão de crédito ou débito.';
+      return 'Entendi. Vou continuar do ponto que faltou no pedido.';
     }
     const next = fallbackText(runtime, 'ASK_MISSING_FIELDS', tx, missing, conversation);
-    return `Respondendo sua pergunta rapidamente: posso ajudar com isso. Agora, ${next.charAt(0).toLowerCase()}${next.slice(1)}`;
+    return `Claro. ${next}`;
   }
   if (action === 'ANSWER_AND_RESUME_CONFIRM') {
     const next = fallbackText(runtime, 'ASK_FIELD_CONFIRMATION', tx, missing, conversation);
@@ -1405,10 +1411,19 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   } catch (_) {}
 
   const classification = await classifierAgent({ runtime, conversation, groupedText: normalized.normalizedText || groupedText });
-  const extracted = classification.requires_extraction ? await extractorAgent({ runtime, groupedText: normalized.normalizedText || groupedText }) : {};
-  if (runtime.segment === 'restaurant' && (!Array.isArray(extracted.items) || extracted.items.length === 0)) {
+  const shouldExtract = classification.requires_extraction
+    || (runtime.segment === 'restaurant' && [
+      STATES.COLLECTING_DATA,
+      STATES.WAITING_CONFIRMATION,
+      STATES.WAITING_PAYMENT,
+    ].includes(conversation.state));
+  const extracted = shouldExtract ? await extractorAgent({ runtime, groupedText: normalized.normalizedText || groupedText }) : {};
+  if (runtime.segment === 'restaurant') {
     const inferred = inferItemsFromMenu(normalized.normalizedText || groupedText, conversation?.companyData?.menu || []);
-    if (inferred.length) extracted.items = inferred;
+    const currentItems = Array.isArray(extracted.items) ? extracted.items : [];
+    if (inferred.length && inferred.length >= currentItems.length) {
+      extracted.items = inferred;
+    }
   }
   log('INFO', 'Ana: classification/extraction', {
     tenantId: runtime.id,
