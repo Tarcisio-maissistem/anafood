@@ -88,6 +88,26 @@ function tenantRuntime(tenant, runtimeOverrides = {}) {
   const currentSettings = agentSettings.get(tenantId) || {};
   const bufferWindowMs = Number(currentSettings.bufferWindowMs || tenantCustom.bufferWindowMs || AGENT_DEFAULTS.bufferWindowMs);
   const greetingMessage = cleanText(currentSettings.greetingMessage || tenantCustom.greetingMessage || AGENT_DEFAULTS.greetingMessage);
+  const restaurantCfg = tenant?.business?.restaurant || {};
+  const companyContext = {
+    companyName: tenant?.name || 'Empresa',
+    address: cleanText(
+      restaurantCfg.address
+      || restaurantCfg.fullAddress
+      || [restaurantCfg.street, restaurantCfg.number, restaurantCfg.neighborhood, restaurantCfg.city]
+        .filter(Boolean)
+        .join(', ')
+    ),
+    openingHours: cleanText(
+      restaurantCfg.openingHours
+      || restaurantCfg.workingHours
+      || restaurantCfg.schedule
+      || ''
+    ),
+    menuHint: cleanText(restaurantCfg.menuHint || restaurantCfg.menuDescription || ''),
+    supportInfo: cleanText(restaurantCfg.supportInfo || ''),
+    paymentInfo: cleanText(restaurantCfg.paymentInfo || ''),
+  };
   return {
     id: tenantId,
     name: tenant?.name || 'Tenant',
@@ -103,6 +123,7 @@ function tenantRuntime(tenant, runtimeOverrides = {}) {
     greetingOncePerDay: true,
     delivery: { requireAddress: tenant?.business?.restaurant?.requireAddress !== false },
     orderProvider: (tenant?.business?.restaurant?.orderProvider || 'saipos').toLowerCase(),
+    companyContext,
     anafood: {
       endpoint: tenant?.integrations?.anafood?.endpoint || process.env.ANAFOOD_API_URL || '',
       authMode: (tenant?.integrations?.anafood?.authMode || process.env.ANAFOOD_AUTH_MODE || 'company_key').toLowerCase(),
@@ -903,7 +924,7 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   return 'Nao entendi completamente. Pode me explicar de forma objetiva?';
 }
 
-async function generatorAgent({ runtime, conversation, classification, orchestratorResult, groupedText }) {
+async function generatorAgent({ runtime, conversation, customer, classification, orchestratorResult, groupedText }) {
   const deterministic = {
     state: conversation.state,
     action: orchestratorResult.action,
@@ -911,6 +932,14 @@ async function generatorAgent({ runtime, conversation, classification, orchestra
     missing: orchestratorResult.missing || [],
     transaction: conversation.transaction,
     userMessage: groupedText || '',
+    customerProfile: {
+      phone: conversation.phone,
+      contactName: conversation.contactName || '',
+      customerName: cleanText(customer?.name || ''),
+      totalOrders: Number(customer?.totalOrders || 0),
+      lastOrderSummary: cleanText(customer?.lastOrderSummary || ''),
+    },
+    companyContext: runtime.companyContext || {},
   };
   if (!openai) {
     return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing, conversation);
@@ -923,9 +952,17 @@ async function generatorAgent({ runtime, conversation, classification, orchestra
       messages: [
         {
           role: 'system',
-          content: `Voce e ${runtime.agentName}. Tom: ${runtime.tone}. Regras: responda perguntas laterais brevemente e retome imediatamente a pergunta pendente do fluxo. Faça apenas 1 pergunta por resposta. Nao invente itens, valores ou regras. Nao finalize sem confirmacao explicita.`,
+          content: `Voce e ${runtime.agentName}. Tom: ${runtime.tone}. Regras: responda perguntas laterais brevemente e retome imediatamente a pergunta pendente do fluxo. Faça apenas 1 pergunta por resposta. Nao invente itens, valores ou regras. Nao finalize sem confirmacao explicita. Use dados da empresa somente se vierem no contexto. Quando faltarem dados, peça de forma natural e menos robotica.`,
         },
-        { role: 'user', content: JSON.stringify({ deterministic, summary: conversation.contextSummary, customPrompt: runtime.customPrompt }) },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            deterministic,
+            summary: conversation.contextSummary,
+            customPrompt: runtime.customPrompt,
+            styleGuide: 'Converse de forma humana, com frases curtas e objetivas. Evite repetir o mesmo texto de saudacao.',
+          }),
+        },
       ],
     });
     const text = cleanText(c.choices?.[0]?.message?.content || '');
@@ -1171,7 +1208,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       const followUp = fallbackText(runtime, followUpAction, conversation.transaction, orchestratorResult.missing || [], conversation);
       return followUp ? `${runtime.greetingMessage} ${followUp}`.trim() : runtime.greetingMessage;
     })()
-    : await generatorAgent({ runtime, conversation, classification, orchestratorResult, groupedText: normalized.normalizedText || groupedText });
+    : await generatorAgent({ runtime, conversation, customer, classification, orchestratorResult, groupedText: normalized.normalizedText || groupedText });
   if (conversation.state !== STATES.HUMAN_HANDOFF || !conversation.handoffNotified) {
     const sent = await sendWhatsAppMessage(conversation.phone, reply, runtime, conversation.remoteJid);
     if (sent && typeof onSend === 'function') {

@@ -49,6 +49,7 @@
     agentSettings: { bufferWindowMs: 20000, greetingMessage: 'Olá! Como posso ajudar você hoje?' },
     pollListBusy: false,
     pollMessageBusy: false,
+    lastRenderedStateText: '',
   };
 
   function syncContactPanelVisibility() {
@@ -144,7 +145,7 @@
     syncContactPanelVisibility();
     ui.list.innerHTML = '';
     for (const conversation of state.conversations) {
-      const rowKey = String(conversation.remoteJid || conversation.phone || '');
+      const rowKey = String(conversation.phone || conversation.remoteJid || '');
       const item = document.createElement('div');
       item.className = `item ${state.selectedConversationKey === rowKey ? 'active' : ''}`;
       const preview = escapeHtml((conversation.lastMessage && conversation.lastMessage.content) || 'Sem mensagens');
@@ -183,13 +184,13 @@
 
     state.conversations = data.conversations || [];
     if (state.selectedConversationKey) {
-      state.selectedConversation = state.conversations.find((c) => String(c.remoteJid || c.phone || '') === state.selectedConversationKey) || state.selectedConversation;
+      state.selectedConversation = state.conversations.find((c) => String(c.phone || c.remoteJid || '') === state.selectedConversationKey) || state.selectedConversation;
       if (state.selectedConversation && state.selectedConversation.remoteJid) {
         state.selectedRemoteJid = state.selectedConversation.remoteJid;
         state.selectedPhone = state.selectedConversation.phone || state.selectedPhone;
       }
     }
-    if (state.selectedConversationKey && !state.conversations.some((c) => String(c.remoteJid || c.phone || '') === state.selectedConversationKey)) {
+    if (state.selectedConversationKey && !state.conversations.some((c) => String(c.phone || c.remoteJid || '') === state.selectedConversationKey)) {
       state.selectedPhone = '';
       state.selectedRemoteJid = '';
       state.selectedConversationKey = '';
@@ -199,7 +200,6 @@
 
     if (state.selectedPhone) {
       await loadControls();
-      await loadMessages();
     } else {
       state.selectedConversation = null;
       ui.messages.innerHTML = '';
@@ -235,13 +235,15 @@
     renderAvatar(ui.contactAvatar, selected);
     ui.contactName.textContent = readableName;
     ui.contactPhone.textContent = state.selectedPhone || '-';
-    ui.contactState.textContent = `Carregando... | Instância: ${state.instance || '-'}`;
+    if (!state.lastRenderedStateText) {
+      ui.contactState.textContent = `Estado: - | Instância: ${state.instance || '-'}`;
+    }
 
     renderAvatar(ui.infoAvatar, selected);
     ui.infoName.textContent = readableName || 'Sem contato';
     ui.infoPhone.textContent = state.selectedPhone || '-';
     ui.infoInstance.textContent = state.instance || '-';
-    ui.infoState.textContent = 'Carregando...';
+    if (!state.lastRenderedStateText) ui.infoState.textContent = '-';
 
     let msgData = { messages: [] };
     let sessionData = {};
@@ -250,11 +252,18 @@
       state.selectedRemoteJid = msgData.remoteJid;
       if (state.selectedConversation) state.selectedConversation.remoteJid = msgData.remoteJid;
     }
+    if (msgData && msgData.avatarUrl && state.selectedConversation) {
+      state.selectedConversation.avatarUrl = msgData.avatarUrl;
+    }
+    if (msgData && msgData.name && state.selectedConversation && !state.selectedConversation.name) {
+      state.selectedConversation.name = msgData.name;
+    }
     sessionData = await fetchJson(`/api/ana/session?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}`);
 
     const conversationState = (sessionData && sessionData.state) || 'INIT';
     const phone = state.selectedPhone;
-    ui.contactState.textContent = `Estado: ${conversationState} | Instância: ${state.instance || '-'}`;
+    state.lastRenderedStateText = `Estado: ${conversationState} | Instância: ${state.instance || '-'}`;
+    ui.contactState.textContent = state.lastRenderedStateText;
     ui.pauseToggle.disabled = false;
     ui.blockToggle.disabled = false;
     ui.deleteConversationBtn.disabled = false;

@@ -1270,7 +1270,7 @@ app.get('/api/ana/messages', (req, res) => {
         instanceName: req.query?.instance || null,
     });
     const tenantId = tenant?.id || 'default';
-    const requestedPhone = normalizePhone(req.query?.phone || '');
+    const requestedPhone = normalizeCanonicalPhone(req.query?.phone || '');
     const requestedRemoteJid = String(req.query?.remoteJid || '').trim();
     const phone = resolveCanonicalPhone({
         tenantId,
@@ -1330,6 +1330,8 @@ app.get('/api/ana/messages', (req, res) => {
             instance: resolvedInstance,
             phone,
             remoteJid,
+            name: safeTrim(session?.contactName || session?.name || ''),
+            avatarUrl: safeTrim(session?.avatarUrl || ''),
             count: messages.length,
             messages,
         });
