@@ -35,7 +35,7 @@ const INTENTS = {
 
 const AGENT_DEFAULTS = {
   bufferWindowMs: BUFFER_WINDOW_MS,
-  greetingMessage: process.env.DEFAULT_GREETING_MESSAGE || 'Olá! Como posso ajudar você hoje?',
+  greetingMessage: process.env.DEFAULT_GREETING_MESSAGE || 'Olá. Posso te ajudar com um pedido ou informação?',
   greetingOncePerDay: true,
 };
 
@@ -1050,7 +1050,7 @@ async function createOrderByProviderIfNeeded({ conversation, runtime, apiRequest
 }
 
 function fallbackText(runtime, action, tx, missing, conversation = null) {
-  if (action === 'WELCOME') return `Ola! Eu sou ${runtime.agentName}. Posso ajudar com um novo pedido ou tirar duvidas.`;
+  if (action === 'WELCOME') return `Olá. Posso te ajudar com um pedido ou informação?`;
   if (action === 'ASK_REPEAT_LAST_ORDER') {
     const preview = cleanText(conversation?.repeatPreview || '');
     if (preview) return `Encontrei seu ultimo pedido: ${preview}. Deseja repetir esse pedido? Responda sim ou nao.`;
@@ -1068,9 +1068,9 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
       ? mcp.paymentMethods.join(' ou ')
       : 'PIX ou cartao';
     const map = {
-      customer_name: 'Para começar, qual é o seu nome?',
+      customer_name: 'Para continuar, qual é o seu nome?',
       items: 'Quais itens e quantidades voce deseja?',
-      notes: 'Deseja adicionar alguma observacao ou complemento? Se nao, responda "sem observacoes".',
+      notes: 'Deseja adicionar alguma observacao? Se nao, responda "sem observacoes".',
       mode: 'Seu pedido é para retirada ou delivery?',
       payment: `Qual forma de pagamento voce prefere: ${payments}?`,
       'address.street_name': 'Qual e o nome da rua para entrega?',
@@ -1094,15 +1094,15 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
       return 'Entendi. Vou continuar do ponto que faltou no pedido.';
     }
     const next = fallbackText(runtime, 'ASK_MISSING_FIELDS', tx, missing, conversation);
-    return `Claro. ${next}`;
+    return next;
   }
   if (action === 'ANSWER_AND_RESUME_CONFIRM') {
     const next = fallbackText(runtime, 'ASK_FIELD_CONFIRMATION', tx, missing, conversation);
-    return `Respondendo sua pergunta rapidamente: posso ajudar com isso. Agora, ${next.charAt(0).toLowerCase()}${next.slice(1)}`;
+    return next;
   }
   if (action === 'ANSWER_AND_RESUME_REPEAT') {
     const next = fallbackText(runtime, 'ASK_REPEAT_LAST_ORDER', tx, missing, conversation);
-    return `Respondendo sua pergunta rapidamente: posso ajudar com isso. Agora, ${next.charAt(0).toLowerCase()}${next.slice(1)}`;
+    return next;
   }
   if (action === 'ORDER_REVIEW') {
     const items = (tx.items || []).map((i) => `${i.quantity}x ${i.name}`).join(', ') || '-';
@@ -1111,7 +1111,7 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
       : 'Retirada no local';
     return `Resumo do pedido:\nCliente: ${tx.customer_name || '-'}\nItens: ${items}\nObservacoes: ${tx.notes || '-'}\nTipo: ${tx.mode === 'TAKEOUT' ? 'Retirada' : 'Delivery'}\nEntrega: ${addr}\nPagamento: ${tx.payment || '-'}\nPode confirmar para eu enviar o pedido?`;
   }
-  if (action === 'CREATE_ORDER_AND_WAIT_PAYMENT') return 'Pedido registrado. Agora aguardando confirmacao do pagamento PIX.';
+  if (action === 'CREATE_ORDER_AND_WAIT_PAYMENT') return 'Pedido registrado. Aguardo a confirmação do pagamento PIX.';
   if (action === 'CREATE_ORDER_AND_CONFIRM' || action === 'PAYMENT_CONFIRMED') return 'Pedido confirmado com sucesso. Estamos preparando tudo.';
   if (action === 'PAYMENT_REMINDER') return 'Ainda nao identifiquei a confirmacao do pagamento. Assim que pagar, me avise com "paguei".';
   if (action === 'REQUEST_ADJUSTMENTS') return 'Perfeito, me diga o que deseja ajustar no pedido.';
@@ -1133,10 +1133,10 @@ function buildMenuReply(conversation, followUp = '') {
   }
   const sections = [];
   for (const [cat, items] of categories.entries()) {
-    const top = items.slice(0, 8).map((i) => `- ${i.name}${Number(i.price || 0) > 0 ? ` (${formatBRL(i.price)})` : ''}`).join('\n');
+    const top = items.slice(0, 6).map((i) => `- ${i.name}${Number(i.price || 0) > 0 ? ` (${formatBRL(i.price)})` : ''}`).join('\n');
     sections.push(`*${cat}*\n${top}`);
   }
-  const base = `🍽️ *Cardapio de hoje*\n\n${sections.slice(0, 4).join('\n\n')}`;
+  const base = `*Cardápio de hoje*\n\n${sections.slice(0, 3).join('\n\n')}`;
   return followUp ? `${base}\n\n${followUp}` : base;
 }
 
@@ -1253,7 +1253,7 @@ async function generatorAgent({ runtime, conversation, customer, classification,
       messages: [
         {
           role: 'system',
-          content: `Voce e ${runtime.agentName}. Tom: ${runtime.tone}. Regras: responda perguntas laterais brevemente e retome imediatamente a pergunta pendente do fluxo. Faça apenas 1 pergunta por resposta. Nao invente itens, valores ou regras. Nao finalize sem confirmacao explicita. Nao peca confirmacao de nome logo no inicio. So pergunte endereco quando tipo for DELIVERY. Use companyMcp para horario, endereco, cardapio, pagamentos e bairros de entrega.`,
+          content: `Você é ${runtime.agentName}, atendente operacional. Tom: ${runtime.tone}. Regras obrigatórias: seja objetiva e previsível; respostas curtas (1-2 frases); uma ação por vez; sem teatralidade, sem floreios, sem emoji excessivo; não invente preço, disponibilidade, prazo ou regra; não repita informações já confirmadas; se não entender, peça o nome exato do item; responda pergunta lateral e retome a próxima etapa pendente do fluxo. Só pergunte endereço quando o tipo for DELIVERY. Use companyMcp para horário, endereço, cardápio, pagamentos e áreas de entrega.`,
         },
         {
           role: 'user',
