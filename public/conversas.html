@@ -1,439 +1,499 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Conversas</title>
+  <title>Conversas · Ana</title>
   <style>
     :root {
-      --bg-app: #0b141a;
-      --bg-left: #111b21;
-      --bg-mid: #0b141a;
-      --bg-right: #111b21;
-      --bg-head: #202c33;
-      --line: #2a3942;
-      --text: #e9edef;
-      --muted: #8696a0;
-      --accent: #00a884;
-      --outgoing: #005c4b;
-      --incoming: #1f2c34;
-      --panel-width: 390px;
-      --info-width: 380px;
+      --wa-bg: #eae6df;
+      --wa-left: #ffffff;
+      --wa-header: #f0f2f5;
+      --wa-line: #e8ecef;
+      --wa-text: #111b21;
+      --wa-muted: #667781;
+      --wa-accent: #00a884;
+      --wa-bubble-in: #ffffff;
+      --wa-bubble-out: #d9fdd3;
+      --wa-active-row: #f0f2f5;
+      --panel-width: 420px;
     }
-    * { box-sizing: border-box; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
     body {
-      margin: 0;
-      color: var(--text);
-      background:
-        linear-gradient(180deg, #00a884 0 130px, transparent 130px),
-        var(--bg-app);
-      font-family: "Segoe UI", Arial, sans-serif;
+      background: #111b21;
+      color: var(--wa-text);
+      font-family: "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 15px;
     }
     .app {
-      width: min(1720px, 100vw);
+      width: 100vw;
       height: 100vh;
-      margin: 0 auto;
       display: grid;
       grid-template-columns: var(--panel-width) 1fr;
-      border-left: 1px solid #0a161c;
-      border-right: 1px solid #0a161c;
-      box-shadow: 0 10px 35px rgba(0, 0, 0, 0.35);
     }
-    .app.contact-selected { grid-template-columns: var(--panel-width) 1fr var(--info-width); }
-    .left, .middle, .right {
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-    }
-    .left { background: var(--bg-left); border-right: 1px solid var(--line); }
-    .middle { background: var(--bg-mid); border-right: 1px solid var(--line); }
-    .right { background: var(--bg-right); display: none; }
-    .app.contact-selected .right { display: flex; }
+    .left, .middle { display: flex; flex-direction: column; min-height: 0; }
+    .left  { background: var(--wa-left); border-right: 1px solid var(--wa-line); }
+    .middle { background: #efeae2; position: relative; }
+
+    /* ── Header ── */
     .head {
-      background: var(--bg-head);
-      border-bottom: 1px solid var(--line);
-      min-height: 60px;
-      padding: 10px 14px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
+      height: 60px; min-height: 60px;
+      padding: 0 16px;
+      display: flex; align-items: center; gap: 10px;
+      background: var(--wa-header);
+      border-bottom: 1px solid var(--wa-line);
+      flex-shrink: 0;
     }
-    .contact-profile {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      min-width: 0;
-      cursor: pointer;
+    .wa-logo {
+      width: 40px; height: 40px; border-radius: 50%;
+      background: #25d366;
+      display: grid; place-items: center; flex: 0 0 auto;
     }
-    .contact-profile:hover { opacity: 0.92; }
     .avatar {
-      width: 40px;
-      height: 40px;
-      border-radius: 50%;
-      background: #2a3942;
-      display: grid;
-      place-items: center;
-      font-weight: 700;
-      font-size: 15px;
-      color: #d2dae0;
-      flex: 0 0 auto;
+      width: 40px; height: 40px; border-radius: 50%;
+      background: #dfe5e8;
+      display: grid; place-items: center;
+      font-size: 14px; font-weight: 700; color: #60717c;
+      flex: 0 0 auto; overflow: hidden; cursor: pointer;
     }
+    .avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .grow { flex: 1; min-width: 0; }
-    .title {
-      font-size: 17px;
-      font-weight: 600;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+    .grow .title {
+      font-size: 17px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .sub {
-      margin-top: 2px;
-      color: var(--muted);
-      font-size: 12px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .actions {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-left: auto;
-      color: #d3dde3;
-      font-size: 12px;
-      white-space: nowrap;
+    .grow .sub {
+      font-size: 13px; color: var(--wa-muted);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      margin-top: 1px;
     }
     .icon-btn {
-      width: 32px;
-      height: 32px;
-      border-radius: 8px;
-      border: 1px solid #3a4a54;
-      background: #1f2a31;
-      color: #d7e0e6;
-      cursor: pointer;
-      font-size: 16px;
-      line-height: 1;
-      display: inline-grid;
-      place-items: center;
+      width: 40px; height: 40px;
+      border: none; border-radius: 50%; background: transparent;
+      color: #54656f; cursor: pointer;
+      display: inline-grid; place-items: center; flex: 0 0 auto;
     }
-    .actions label {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      cursor: pointer;
+    .icon-btn:hover { background: rgba(11,20,26,.07); }
+    .icon-btn svg { display: block; }
+
+    /* ── Search ── */
+    .search { padding: 8px 12px; background: #fff; border-bottom: 1px solid #f0f2f5; flex-shrink: 0; }
+    .search-box {
+      display: flex; align-items: center; gap: 8px;
+      background: #f0f2f5; border-radius: 9px; padding: 7px 12px;
     }
-    .actions input { accent-color: var(--accent); }
-    .btn {
-      background: #1f2a31;
-      border: 1px solid #2c3d47;
-      color: var(--text);
-      border-radius: 8px;
-      padding: 8px 10px;
-      cursor: pointer;
-      font-size: 13px;
+    .search-box input {
+      flex: 1; border: none; background: transparent;
+      font-size: 15px; color: var(--wa-text); outline: none;
     }
-    .btn.primary {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: #05271f;
-      font-weight: 700;
+    .search-box input::placeholder { color: var(--wa-muted); }
+
+    /* ── List ── */
+    .list { flex: 1; overflow-y: auto; overflow-x: hidden; background: #fff; }
+    .conv-item {
+      display: flex; align-items: center; gap: 13px;
+      padding: 10px 16px;
+      border-bottom: 1px solid #f3f5f6;
+      cursor: pointer; background: #fff;
     }
-    .search { padding: 8px 12px; border-bottom: 1px solid #172027; }
-    .search input {
-      width: 100%;
-      border: 1px solid #2b3c46;
-      border-radius: 8px;
-      background: #202c33;
-      color: var(--text);
-      padding: 10px 12px;
-      outline: none;
+    .conv-item:hover  { background: #f7f9fa; }
+    .conv-item.active { background: var(--wa-active-row); }
+    .conv-av {
+      width: 49px; height: 49px; border-radius: 50%;
+      background: #dfe5e8;
+      display: grid; place-items: center;
+      font-size: 15px; font-weight: 700; color: #60717c;
+      flex: 0 0 auto; overflow: hidden;
     }
-    .list { flex: 1; overflow: auto; }
-    .item {
-      cursor: pointer;
-      display: grid;
-      grid-template-columns: 52px 1fr auto;
-      gap: 10px;
-      align-items: center;
-      padding: 11px 12px;
-      border-bottom: 1px solid #172027;
+    .conv-av img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .conv-body { flex: 1; min-width: 0; }
+    .conv-row { display: flex; justify-content: space-between; align-items: baseline; gap: 4px; }
+    .conv-name {
+      font-size: 16px; font-weight: 500; color: #111b21;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .item:hover { background: #1f2a31; }
-    .item.active { background: #2a3942; }
-    .item .name {
-      font-size: 15px;
-      font-weight: 500;
-      margin-bottom: 3px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+    .conv-time { font-size: 12px; color: var(--wa-muted); white-space: nowrap; flex: 0 0 auto; }
+    .conv-preview {
+      font-size: 14px; color: var(--wa-muted);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      margin-top: 3px;
     }
-    .item .preview {
-      color: var(--muted);
-      font-size: 12px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 230px;
+
+    /* ── Middle empty state ── */
+    #noConvPlaceholder {
+      flex: 1; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 20px;
+      background: #f8f9fa; padding: 32px; text-align: center;
     }
-    .item .time { color: var(--muted); font-size: 11px; }
+    #noConvPlaceholder p { font-size: 15px; color: var(--wa-muted); line-height: 1.6; }
+
+    /* ── Messages ── */
     .messages {
-      flex: 1;
-      min-height: 0;
-      overflow: auto;
-      padding: 18px 24px;
-      background:
-        radial-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-        #0f1a20;
-      background-size: 22px 22px;
+      flex: 1; overflow-y: auto; overflow-x: hidden;
+      padding: 12px 8.5% 16px;
+      background-color: #efeae2;
+      background-image:
+        radial-gradient(circle at 25px 25px, rgba(208,201,191,.45) 1.2px, transparent 1.3px),
+        radial-gradient(circle at 7px  7px,  rgba(208,201,191,.3)  0.9px, transparent 1px);
+      background-size: 34px 34px, 22px 22px;
     }
-    .msg { display: flex; margin-bottom: 9px; }
-    .msg.user { justify-content: flex-start; }
+    .msg { display: flex; margin: 2px 0; }
+    .msg.user      { justify-content: flex-start; }
     .msg.assistant { justify-content: flex-end; }
     .bubble {
-      max-width: 70%;
-      padding: 7px 9px;
+      position: relative;
+      max-width: min(72%, 820px);
       border-radius: 8px;
-      line-height: 1.35;
-      font-size: 14px;
-      white-space: pre-wrap;
-      word-break: break-word;
-      box-shadow: 0 1px 1px rgba(0,0,0,0.25);
+      padding: 6px 8px 18px;
+      font-size: 14.2px; line-height: 1.45;
+      box-shadow: 0 1px .5px rgba(11,20,26,.13);
+      white-space: pre-wrap; word-break: break-word;
     }
-    .msg.user .bubble { background: var(--incoming); }
-    .msg.assistant .bubble { background: var(--outgoing); }
-    .at {
-      margin-top: 4px;
-      text-align: right;
-      font-size: 11px;
-      color: #b7c7c0;
-    }
-    .msg.user .at { color: var(--muted); }
+    .msg.user .bubble      { background: var(--wa-bubble-in); border-top-left-radius: 0; }
+    .msg.assistant .bubble { background: var(--wa-bubble-out); border-top-right-radius: 0; }
+    .at { position: absolute; right: 7px; bottom: 3px; font-size: 11px; color: #8696a0; }
+
+    /* ── Composer ── */
     .composer {
-      border-top: 1px solid var(--line);
-      background: var(--bg-head);
-      padding: 10px 12px;
-      display: grid;
-      grid-template-columns: auto auto 1fr auto;
-      gap: 8px;
-      align-items: center;
+      position: relative;
+      background: #f0f2f5; border-top: 1px solid #e4e8eb;
+      padding: 8px 16px;
+      display: flex; align-items: flex-end; gap: 8px;
+      flex-shrink: 0;
     }
     .composer textarea {
-      width: 100%;
-      min-height: 42px;
-      max-height: 140px;
-      resize: vertical;
-      padding: 10px;
-      border-radius: 8px;
-      border: 1px solid #2c3d47;
-      background: #111b21;
-      color: var(--text);
-      outline: none;
+      flex: 1; min-height: 44px; max-height: 200px;
+      border: none; border-radius: 9px;
+      background: #fff; padding: 11px 14px;
+      font-size: 15px; color: var(--wa-text);
+      outline: none; resize: none; line-height: 1.4;
+      font-family: inherit; overflow-y: auto;
     }
+    .send-btn {
+      width: 44px; height: 44px; flex: 0 0 auto;
+      border: none; border-radius: 50%;
+      background: var(--wa-accent); color: #fff;
+      cursor: pointer; display: grid; place-items: center;
+    }
+    .send-btn:hover { background: #017f63; }
+
+    /* ── Pop-up menus ── */
+    .pop {
+      position: absolute;
+      background: #fff; border-radius: 12px;
+      box-shadow: 0 6px 20px rgba(11,20,26,.18);
+      border: 1px solid rgba(0,0,0,.06);
+      display: none; z-index: 30;
+    }
+    .pop.open { display: block; }
+    .attach-menu { width: 210px; left: 16px; bottom: 66px; padding: 8px 0; }
+    .attach-item {
+      width: 100%; border: none; background: transparent;
+      text-align: left; padding: 9px 16px;
+      color: #111b21; font-size: 14.5px;
+      cursor: pointer; display: flex; align-items: center; gap: 14px;
+    }
+    .attach-item:hover { background: #f7f9fa; }
+    .attach-dot {
+      width: 42px; height: 42px; border-radius: 50%;
+      display: grid; place-items: center; flex: 0 0 auto;
+    }
+    .emoji-menu {
+      max-width: 300px; padding: 8px;
+      display: grid; grid-template-columns: repeat(8,1fr); gap: 3px;
+      left: 60px; bottom: 66px;
+    }
+    .emoji-item {
+      border: none; background: transparent;
+      font-size: 22px; cursor: pointer;
+      border-radius: 6px; padding: 3px; line-height: 1;
+    }
+    .emoji-item:hover { background: #f0f2f5; }
+
+    /* ── Status bar ── */
     .status {
-      border-top: 1px dashed var(--line);
-      color: var(--muted);
-      font-size: 12px;
-      padding: 7px 12px;
-      min-height: 30px;
+      min-height: 26px; padding: 4px 16px 5px;
+      font-size: 12px; color: var(--wa-muted);
+      background: #f0f2f5; border-top: 1px dashed #d8e0e5;
+      flex-shrink: 0;
     }
-    .ok { color: #7de7be; }
-    .warn { color: #ffd27a; }
-    .err { color: #ff8a93; }
-    .pane {
-      padding: 18px;
-      border-bottom: 1px solid var(--line);
+    .ok   { color: #00a884; }
+    .warn { color: #946b00; }
+    .err  { color: #cf3b41; }
+
+    /* ── Controls ── */
+    .switch {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 13px; color: #435560; white-space: nowrap; cursor: pointer;
     }
-    .danger {
-      background: #3c1e23;
-      border: 1px solid #5b2f37;
-      color: #ffd4d8;
-      border-radius: 8px;
-      padding: 10px 12px;
-      cursor: pointer;
-      font-size: 13px;
-      width: 100%;
-      text-align: left;
+    .switch input { accent-color: var(--wa-accent); cursor: pointer; }
+    .btn-danger {
+      border: none; border-radius: 16px;
+      background: #fbeaea; color: #9b2c2c;
+      padding: 7px 12px; font-size: 13px; font-weight: 600;
+      cursor: pointer; display: inline-flex; align-items: center; gap: 5px;
+      white-space: nowrap;
     }
+    .btn-danger:hover { background: #f5c6c6; }
+
+    /* ── Modals ── */
     .modal-backdrop {
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.5);
-      display: none;
-      align-items: center;
-      justify-content: center;
-      z-index: 1000;
+      position: fixed; inset: 0;
+      display: none; align-items: center; justify-content: center;
+      background: rgba(0,0,0,.5); z-index: 100;
     }
     .modal-backdrop.open { display: flex; }
     .modal {
       width: min(560px, 94vw);
-      background: #122028;
-      border: 1px solid #2d3f4a;
-      border-radius: 12px;
-      padding: 18px;
+      border-radius: 12px; background: #fff;
+      border: 1px solid #dde3e7; padding: 20px;
     }
-    .modal h3 { margin: 0 0 14px 0; font-size: 18px; }
-    .field { margin-bottom: 12px; }
-    .field label { display: block; margin-bottom: 6px; color: #d8e0e6; font-size: 13px; }
+    .modal h3 { font-size: 17px; margin-bottom: 12px; }
+    .field { margin-bottom: 14px; }
+    .field label { font-size: 13px; color: #435560; display: block; margin-bottom: 5px; font-weight: 500; }
     .field input, .field textarea {
-      width: 100%;
-      border: 1px solid #334651;
-      border-radius: 8px;
-      background: #0f1a20;
-      color: #e9edef;
-      padding: 10px;
-      font-size: 14px;
+      width: 100%; border: 1px solid #d2dbe0; border-radius: 8px;
+      background: #fff; padding: 10px 12px; font-size: 14px;
+      color: var(--wa-text); outline: none; font-family: inherit;
     }
-    .field textarea { min-height: 96px; resize: vertical; }
-    .modal-actions {
-      display: flex;
-      justify-content: flex-end;
-      gap: 8px;
-      margin-top: 8px;
+    .field input:focus, .field textarea:focus { border-color: var(--wa-accent); }
+    .field textarea { min-height: 90px; resize: vertical; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+    .btn {
+      border: 1px solid #d1dbe1; border-radius: 8px;
+      background: #fff; color: var(--wa-text);
+      padding: 9px 18px; cursor: pointer; font-size: 14px;
     }
-    .pane h3 {
-      margin: 0 0 12px 0;
-      font-size: 14px;
-      color: #c6d2d9;
-      font-weight: 600;
-    }
-    .profile {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 12px;
-      padding: 28px 18px;
-    }
-    .profile .avatar {
-      width: 120px;
-      height: 120px;
-      font-size: 40px;
-      background: #2a3942;
-    }
-    .profile .name {
-      font-size: 22px;
-      font-weight: 500;
-      text-align: center;
-      word-break: break-word;
-    }
-    .profile .meta {
-      text-align: center;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.35;
-    }
-    .flags label {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      margin-bottom: 10px;
-      color: #d2dae0;
-      font-size: 14px;
-      cursor: pointer;
-    }
-    .flags input { accent-color: var(--accent); }
-    @media (max-width: 1400px) {
-      .app { grid-template-columns: 340px 1fr; }
-      .app.contact-selected { grid-template-columns: 340px 1fr 320px; }
-    }
-    @media (max-width: 1120px) {
+    .btn:hover { background: #f5f7f8; }
+    .btn.primary { background: var(--wa-accent); border-color: var(--wa-accent); color: #fff; font-weight: 600; }
+    .btn.primary:hover { background: #017f63; }
+    .btn.danger  { background: #c0392b; border-color: #c0392b; color: #fff; font-weight: 600; }
+    .btn.danger:hover  { background: #a93226; }
+
+    /* ── Scrollbars ── */
+    .list::-webkit-scrollbar, .messages::-webkit-scrollbar { width: 4px; }
+    .list::-webkit-scrollbar-thumb, .messages::-webkit-scrollbar-thumb { background: #ced7dc; border-radius: 999px; }
+    .list::-webkit-scrollbar-track, .messages::-webkit-scrollbar-track { background: transparent; }
+
+    @media (max-width: 900px) {
       .app { grid-template-columns: 1fr; }
-      .right { display: none; }
-      .left { border-right: none; border-bottom: 1px solid var(--line); max-height: 42vh; }
-      .middle { min-height: 58vh; border-right: none; }
-      .composer { grid-template-columns: auto 1fr auto; }
-      #recordBtn { display: none; }
-      .actions { display: none; }
+      .left  { max-height: 40vh; border-right: none; border-bottom: 1px solid var(--wa-line); }
+      .middle { min-height: 60vh; }
     }
   </style>
 </head>
 <body>
-  <div class="app">
-    <section class="left">
-      <div class="head">
-        <div class="avatar">A</div>
-        <div class="grow">
-          <div class="title">Conversas</div>
-          <div id="instanceInfo" class="sub">Instância padrão: carregando...</div>
-        </div>
-        <button id="refreshBtn" class="btn">Atualizar</button>
-      </div>
-      <div class="search">
-        <input id="searchInput" placeholder="Pesquisar ou começar nova conversa" />
-      </div>
-      <div id="list" class="list"></div>
-    </section>
+<div class="app">
 
-    <section class="middle">
-      <div class="head">
-        <div id="contactProfile" class="contact-profile">
-          <div id="contactAvatar" class="avatar">--</div>
-          <div class="grow">
-            <div id="contactName" class="title">Selecione uma conversa</div>
-            <div id="contactPhone" class="sub">Sem contato selecionado</div>
-            <div id="contactState" class="sub">Clique no perfil para ver detalhes</div>
-          </div>
-        </div>
-        <div class="actions">
-          <label><input id="pauseToggle" type="checkbox" /> Pausar agente</label>
-          <label><input id="blockToggle" type="checkbox" /> Bloquear contato</label>
-          <button id="agentSettingsBtn" class="icon-btn" title="Configurações do agente">⚙</button>
-        </div>
+  <!-- ═══ LEFT PANEL ═══ -->
+  <section class="left">
+    <div class="head">
+      <div class="wa-logo">
+        <svg viewBox="0 0 32 32" width="24" height="24" fill="white" xmlns="http://www.w3.org/2000/svg">
+          <path d="M16 2C8.27 2 2 8.27 2 16c0 2.41.64 4.66 1.74 6.62L2 30l7.57-1.72C11.4 29.37 13.64 30 16 30c7.73 0 14-6.27 14-14S23.73 2 16 2zm0 25.6c-1.87 0-3.66-.5-5.22-1.37l-.37-.22-3.87 1 1.03-3.76-.24-.38A11.48 11.48 0 014.4 16C4.4 9.6 9.6 4.4 16 4.4S27.6 9.6 27.6 16 22.4 27.6 16 27.6zm6.37-8.4c-.35-.17-2.06-.99-2.38-1.1s-.55-.17-.78.17c-.23.35-.9 1.1-1.1 1.33s-.4.26-.76.09c-.35-.17-1.49-.54-2.84-1.73-1.05-.93-1.75-2.07-1.96-2.42s-.02-.54.16-.71c.16-.15.35-.4.52-.6s.23-.35.34-.58.06-.44-.03-.61c-.09-.17-.78-1.87-1.07-2.56-.28-.67-.57-.58-.78-.59h-.67c-.23 0-.6.09-.91.44s-1.2 1.17-1.2 2.85 1.23 3.31 1.4 3.54c.18.23 2.43 3.71 5.89 5.2.82.36 1.46.57 1.96.73.82.26 1.57.22 2.16.13.66-.1 2.04-.83 2.33-1.63s.29-1.49.2-1.63c-.09-.14-.32-.23-.67-.4z"/>
+        </svg>
       </div>
-      <div id="messages" class="messages"></div>
-      <div class="composer">
-        <button id="attachBtn" class="btn">Arquivo</button>
-        <button id="recordBtn" class="btn">Gravar</button>
-        <textarea id="textInput" placeholder="Digite uma mensagem"></textarea>
-        <button id="sendBtn" class="btn primary">Enviar</button>
-        <input id="fileInput" type="file" hidden />
+      <div class="grow">
+        <div class="title">WhatsApp</div>
+        <div id="instanceInfo" class="sub">Instância: carregando...</div>
       </div>
-      <div id="status" class="status">Carregando inbox...</div>
-    </section>
+      <button id="refreshBtn" class="icon-btn" title="Atualizar lista">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"/>
+          <polyline points="1 20 1 14 7 14"/>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+        </svg>
+      </button>
+    </div>
 
-    <aside class="right">
-      <div class="head">
-        <div class="title">Informações do contato</div>
-      </div>
-      <div class="profile">
-        <div id="infoAvatar" class="avatar">--</div>
-        <div id="infoName" class="name">Sem contato</div>
-        <div id="infoPhone" class="meta">Selecione uma conversa para visualizar os dados.</div>
-      </div>
-      <div class="pane flags">
-        <h3>Status do contato</h3>
-        <div id="rightStatus" class="sub">Use os controles na barra superior.</div>
-      </div>
-      <div class="pane">
-        <h3>Instância ativa</h3>
-        <div id="infoInstance" class="sub">-</div>
-      </div>
-      <div class="pane">
-        <h3>Estado da conversa</h3>
-        <div id="infoState" class="sub">-</div>
-      </div>
-      <div class="pane">
-        <button id="deleteConversationBtn" class="danger">Excluir conversa inteira</button>
-      </div>
-    </aside>
-  </div>
-  <div id="agentSettingsModal" class="modal-backdrop">
-    <div class="modal">
-      <h3>Configurações do agente</h3>
-      <div class="field">
-        <label for="bufferSecondsInput">Tempo de buffer (segundos)</label>
-        <input id="bufferSecondsInput" type="number" min="3" max="120" step="1" />
-      </div>
-      <div class="field">
-        <label for="greetingMessageInput">Mensagem de saudação (1x por dia)</label>
-        <textarea id="greetingMessageInput"></textarea>
-      </div>
-      <div class="modal-actions">
-        <button id="closeAgentSettingsBtn" class="btn">Cancelar</button>
-        <button id="saveAgentSettingsBtn" class="btn primary">Salvar</button>
+    <div class="search">
+      <div class="search-box">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#8696a0" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input id="searchInput" placeholder="Pesquisar conversas" />
       </div>
     </div>
+
+    <div id="list" class="list"></div>
+  </section>
+
+  <!-- ═══ RIGHT PANEL ═══ -->
+  <section class="middle" id="middlePanel">
+
+    <!-- No conversation selected placeholder -->
+    <div id="noConvPlaceholder" style="display:flex">
+      <svg viewBox="0 0 303 172" width="220" opacity=".08" fill="#00a884">
+        <path d="M229 0H74C33.1 0 0 33.1 0 74v24c0 40.9 33.1 74 74 74h4l-4 30 52.7-30H229c40.9 0 74-33.1 74-74V74c0-40.9-33.1-74-74-74z"/>
+      </svg>
+      <p>Selecione uma conversa<br>para começar a ler o histórico</p>
+    </div>
+
+    <!-- Chat header (hidden until conversation selected) -->
+    <div class="head" id="chatHeader" style="display:none">
+      <div id="contactProfile" class="avatar">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="#aab8c0">
+          <path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/>
+        </svg>
+      </div>
+      <div class="grow">
+        <div id="contactName" class="title">—</div>
+        <div id="contactPhone" class="sub">—</div>
+        <div id="contactState" class="sub" style="font-size:11px"></div>
+      </div>
+      <label class="switch" title="Desabilitar respostas automáticas da Ana para este contato">
+        <input id="pauseToggle" type="checkbox" disabled />
+        <span>Desabilitar Ana</span>
+      </label>
+      <label class="switch">
+        <input id="blockToggle" type="checkbox" disabled />
+        <span>Bloquear</span>
+      </label>
+      <button id="clearContextBtn" class="btn-danger" title="Limpar contexto e memória do cliente" style="display:none">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+          <path d="M10 11v6"/><path d="M14 11v6"/>
+          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+        </svg>
+        Limpar
+      </button>
+      <button id="agentSettingsBtn" class="icon-btn" title="Configurações do agente">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    </div>
+
+    <div id="messages" class="messages" style="display:none"></div>
+
+    <!-- Composer (hidden until conversation selected) -->
+    <div class="composer" id="composerBar" style="display:none">
+      <button id="emojiBtn" class="icon-btn" title="Emoji">
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#54656f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M8 14s1.5 2 4 2 4-2 4-2"/>
+          <line x1="9" y1="9" x2="9.01" y2="9"/>
+          <line x1="15" y1="9" x2="15.01" y2="9"/>
+        </svg>
+      </button>
+      <button id="attachBtn" class="icon-btn" title="Anexar">
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#54656f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+        </svg>
+      </button>
+      <textarea id="textInput" placeholder="Digite uma mensagem" rows="1"></textarea>
+      <button id="sendBtn" class="send-btn" title="Enviar">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="white">
+          <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+        </svg>
+      </button>
+
+      <!-- Attachment menu -->
+      <div id="attachMenu" class="pop attach-menu">
+        <button type="button" id="pickDocumentBtn" class="attach-item">
+          <span class="attach-dot" style="background:#7b61ff">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="white"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
+          </span>
+          Documento
+        </button>
+        <button type="button" id="pickMediaBtn" class="attach-item">
+          <span class="attach-dot" style="background:#2d8cff">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5" fill="white" stroke="none"/><polyline points="21 15 16 10 5 21"/></svg>
+          </span>
+          Fotos e vídeos
+        </button>
+        <button type="button" id="recordBtn" class="attach-item">
+          <span class="attach-dot" style="background:#ff7a1a" id="recordDot">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+          </span>
+          <span id="recordLabel">Áudio</span>
+        </button>
+        <button type="button" id="sendLocationBtn" class="attach-item">
+          <span class="attach-dot" style="background:#00a884">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+              <circle cx="12" cy="10" r="3"/>
+            </svg>
+          </span>
+          Localização
+        </button>
+        <button type="button" id="sendPixBtn" class="attach-item">
+          <span class="attach-dot" style="background:#00c281">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="white">
+              <path d="M11.944 17.97L4.58 13.62 11.943 24l7.37-10.38-7.37 4.35zm.112-15.97L4.58 13.38l7.477 4.46L19.42 13.38 12.057 2z"/>
+            </svg>
+          </span>
+          Pix
+        </button>
+        <button type="button" id="sendMenuBtn" class="attach-item">
+          <span class="attach-dot" style="background:#f6b100">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round">
+              <line x1="8" y1="6"  x2="21" y2="6"/>
+              <line x1="8" y1="12" x2="21" y2="12"/>
+              <line x1="8" y1="18" x2="21" y2="18"/>
+              <line x1="3" y1="6"  x2="3.01" y2="6"/>
+              <line x1="3" y1="12" x2="3.01" y2="12"/>
+              <line x1="3" y1="18" x2="3.01" y2="18"/>
+            </svg>
+          </span>
+          Cardápio
+        </button>
+      </div>
+
+      <!-- Emoji menu -->
+      <div id="emojiMenu" class="pop emoji-menu"></div>
+
+      <input id="fileInput" type="file" hidden />
+    </div>
+
+    <div id="status" class="status">Carregando inbox...</div>
+  </section>
+</div>
+
+<!-- ═══ Modal: Limpar contexto ═══ -->
+<div id="clearContextModal" class="modal-backdrop">
+  <div class="modal">
+    <h3 style="color:#c0392b">⚠️ Limpar contexto e memória</h3>
+    <p style="font-size:14px;color:#435560;line-height:1.6;margin-bottom:4px">
+      Isso apagará <strong>completamente</strong> a conversa atual, o nome salvo, o histórico de pedidos
+      e todos os dados do cliente em memória.<br><br>
+      Na próxima interação a Ana tratará este contato como um <strong>cliente novo</strong>.
+    </p>
+    <p id="clearContextPhone" style="font-size:13px;color:#8696a0;margin-top:6px"></p>
+    <div class="modal-actions">
+      <button id="cancelClearBtn" class="btn">Cancelar</button>
+      <button id="confirmClearBtn" class="btn danger">Sim, limpar tudo</button>
+    </div>
   </div>
-  <script src="/conversas.js"></script>
+</div>
+
+<!-- ═══ Modal: Configurações do agente ═══ -->
+<div id="agentSettingsModal" class="modal-backdrop">
+  <div class="modal">
+    <h3>Configurações do agente</h3>
+    <div class="field">
+      <label for="bufferSecondsInput">Tempo de buffer de mensagens (segundos)</label>
+      <input id="bufferSecondsInput" type="number" min="3" max="120" step="1" />
+    </div>
+    <div class="field">
+      <label for="greetingMessageInput">Mensagem de saudação (1× por dia)</label>
+      <textarea id="greetingMessageInput"></textarea>
+    </div>
+    <div class="modal-actions">
+      <button id="closeAgentSettingsBtn" class="btn">Cancelar</button>
+      <button id="saveAgentSettingsBtn" class="btn primary">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<script src="/conversas.js"></script>
 </body>
 </html>

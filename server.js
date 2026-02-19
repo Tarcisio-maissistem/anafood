@@ -10,6 +10,7 @@ const {
     getAgentSettings: getAnaAgentSettings,
     setAgentSettings: setAnaAgentSettings,
     sessions: anaSessions,
+    clearCustomerAndSession: anaClearCustomerAndSession,
 } = require('./agents/ana');
 const { resolveTenant, listTenants } = require('./lib/tenants');
 const { loadCompanyData } = require('./lib/company-data-mcp');
@@ -310,8 +311,36 @@ const sendEvolutionText = async ({ apiUrl, apiKey, instance, phone, remoteJid, t
     return { ok: false, error: lastError || 'Falha desconhecida no envio de texto' };
 };
 
-const sendEvolutionMedia = async ({ apiUrl, apiKey, instance, phone, remoteJid, base64, mimeType, fileName, caption = '' }) => {
+const resolveMediaType = (mimeType = '', fileName = '', mediaKind = '') => {
+    const kind = String(mediaKind || '').trim().toLowerCase();
+    if (['audio', 'video', 'image', 'document'].includes(kind)) return kind;
+    const mime = String(mimeType || '').trim().toLowerCase();
+    const file = String(fileName || '').trim().toLowerCase();
+    if (mime.startsWith('image/')) return 'image';
+    if (mime.startsWith('video/')) return 'video';
+    if (mime.startsWith('audio/')) return 'audio';
+    if (/\.(png|jpe?g|gif|webp|bmp|svg)$/.test(file)) return 'image';
+    if (/\.(mp4|mov|avi|mkv|webm)$/.test(file)) return 'video';
+    if (/\.(ogg|oga|opus|mp3|wav|m4a|aac|webm)$/.test(file)) return 'audio';
+    return 'document';
+};
+
+const sendEvolutionMedia = async ({ apiUrl, apiKey, instance, phone, remoteJid, base64, mimeType, fileName, caption = '', mediaKind = '' }) => {
     if (!apiUrl || !apiKey || !instance || !base64) return { ok: false, error: 'Parametros invalidos para envio de midia' };
+    const resolvedMediaType = resolveMediaType(mimeType, fileName, mediaKind);
+    const safeMimeType = mimeType || (
+        resolvedMediaType === 'image' ? 'image/jpeg'
+            : resolvedMediaType === 'video' ? 'video/mp4'
+                : resolvedMediaType === 'audio' ? 'audio/ogg'
+                    : 'application/octet-stream'
+    );
+    const safeFileName = fileName || (
+        resolvedMediaType === 'image' ? 'imagem.jpg'
+            : resolvedMediaType === 'video' ? 'video.mp4'
+                : resolvedMediaType === 'audio' ? 'audio.ogg'
+                    : 'arquivo.bin'
+    );
+    const mediaDataUrl = `data:${safeMimeType};base64,${base64}`;
 
     const rawPhone = String(phone || '').trim();
     const digitsPhone = normalizePhone(rawPhone);
@@ -326,25 +355,43 @@ const sendEvolutionMedia = async ({ apiUrl, apiKey, instance, phone, remoteJid, 
     const endpoints = [
         `${apiUrl}/message/sendMedia/${instance}`,
         `${apiUrl}/message/sendFileFromBase64/${instance}`,
+        `${apiUrl}/message/sendWhatsAppAudio/${instance}`,
+        `${apiUrl}/message/sendPtt/${instance}`,
     ];
     const payloads = [
         {
             number: null,
-            mediatype: 'document',
-            mimetype: mimeType || 'application/octet-stream',
-            fileName: fileName || 'arquivo.bin',
+            mediatype: resolvedMediaType,
+            mimetype: safeMimeType,
+            fileName: safeFileName,
             caption,
             media: base64,
+            ptt: resolvedMediaType === 'audio',
+        },
+        {
+            number: null,
+            mediatype: resolvedMediaType,
+            mimetype: safeMimeType,
+            fileName: safeFileName,
+            caption,
+            media: mediaDataUrl,
+            ptt: resolvedMediaType === 'audio',
+        },
+        {
+            number: null,
+            audio: base64,
+            ptt: true,
         },
         {
             number: null,
             options: { delay: 600 },
             mediaMessage: {
-                mediatype: 'document',
-                mimetype: mimeType || 'application/octet-stream',
-                fileName: fileName || 'arquivo.bin',
+                mediatype: resolvedMediaType,
+                mimetype: safeMimeType,
+                fileName: safeFileName,
                 caption,
                 media: base64,
+                ptt: resolvedMediaType === 'audio',
             },
         },
     ];
@@ -1439,6 +1486,7 @@ app.post('/api/ana/send', async (req, res) => {
         const mediaBase64 = String(req.body?.mediaBase64 || '').trim();
         const mimeType = String(req.body?.mimeType || '').trim();
         const fileName = String(req.body?.fileName || '').trim();
+        const mediaKind = String(req.body?.mediaKind || '').trim().toLowerCase();
         const caption = String(req.body?.caption || text || '').trim();
 
         let result;
@@ -1453,6 +1501,7 @@ app.post('/api/ana/send', async (req, res) => {
                 mimeType,
                 fileName,
                 caption,
+                mediaKind,
             });
         } else if (text) {
             result = await sendEvolutionText({
@@ -1471,8 +1520,9 @@ app.post('/api/ana/send', async (req, res) => {
             return res.status(502).json({ success: false, error: result?.error || 'Falha ao enviar mensagem' });
         }
 
+        const mediaLabel = mediaKind === 'audio' ? 'audio' : 'midia';
         const outboundText = mediaBase64
-            ? `[midia] ${caption || fileName || mimeType || 'arquivo'}`
+            ? `[${mediaLabel}] ${caption || fileName || mimeType || 'arquivo'}`
             : text;
         logConversationEvent({
             direction: 'OUT',
@@ -1491,7 +1541,7 @@ app.post('/api/ana/send', async (req, res) => {
             session.messages = Array.isArray(session.messages) ? session.messages : [];
             session.messages.push({
                 role: 'assistant',
-                content: mediaBase64 ? `[midia] ${caption || fileName || mimeType || 'arquivo'}` : text,
+                content: mediaBase64 ? `[${mediaLabel}] ${caption || fileName || mimeType || 'arquivo'}` : text,
                 at: new Date().toISOString(),
                 metadata: { manual: true },
             });
@@ -1560,6 +1610,30 @@ app.delete('/api/ana/conversation', async (req, res) => {
             evolutionDelete,
             instance: resolvedInstance,
         });
+    } catch (error) {
+        handleError(res, error);
+    }
+});
+
+/**
+ * POST /api/ana/conversation/clear
+ * Limpa completamente o contexto de conversa E o perfil do cliente (nome, histórico, pedidos)
+ * Body: { phone, tenant_id?, instance? }
+ */
+app.post('/api/ana/conversation/clear', async (req, res) => {
+    try {
+        const tenant = resolveTenant({
+            tenantId: req.body?.tenant_id || req.body?.tenant || null,
+            instanceName: req.body?.instance || null,
+        });
+        const tenantId = tenant?.id || 'default';
+        const requestedPhone = normalizePhone(req.body?.phone || '');
+        if (!requestedPhone) {
+            return res.status(400).json({ success: false, error: 'Informe "phone"' });
+        }
+        const phone = resolveCanonicalPhone({ tenantId, phone: requestedPhone, remoteJid: '' }) || requestedPhone;
+        const result = anaClearCustomerAndSession(tenantId, phone);
+        return res.json({ success: true, tenantId, phone, ...result });
     } catch (error) {
         handleError(res, error);
     }

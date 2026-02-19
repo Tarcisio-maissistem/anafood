@@ -1,39 +1,52 @@
-﻿(function () {
+(function () {
+  'use strict';
+
+  /* ── UI refs ── */
   const ui = {
-    appRoot: document.querySelector('.app'),
-    instanceInfo: document.getElementById('instanceInfo'),
-    refreshBtn: document.getElementById('refreshBtn'),
-    searchInput: document.getElementById('searchInput'),
-    list: document.getElementById('list'),
-    contactProfile: document.getElementById('contactProfile'),
-    contactAvatar: document.getElementById('contactAvatar'),
-    contactName: document.getElementById('contactName'),
-    contactPhone: document.getElementById('contactPhone'),
-    contactState: document.getElementById('contactState'),
-    pauseToggle: document.getElementById('pauseToggle'),
-    blockToggle: document.getElementById('blockToggle'),
-    agentSettingsBtn: document.getElementById('agentSettingsBtn'),
-    messages: document.getElementById('messages'),
-    textInput: document.getElementById('textInput'),
-    sendBtn: document.getElementById('sendBtn'),
-    attachBtn: document.getElementById('attachBtn'),
-    recordBtn: document.getElementById('recordBtn'),
-    fileInput: document.getElementById('fileInput'),
-    status: document.getElementById('status'),
-    infoAvatar: document.getElementById('infoAvatar'),
-    infoName: document.getElementById('infoName'),
-    infoPhone: document.getElementById('infoPhone'),
-    infoInstance: document.getElementById('infoInstance'),
-    infoState: document.getElementById('infoState'),
-    rightStatus: document.getElementById('rightStatus'),
-    deleteConversationBtn: document.getElementById('deleteConversationBtn'),
-    agentSettingsModal: document.getElementById('agentSettingsModal'),
-    bufferSecondsInput: document.getElementById('bufferSecondsInput'),
-    greetingMessageInput: document.getElementById('greetingMessageInput'),
-    closeAgentSettingsBtn: document.getElementById('closeAgentSettingsBtn'),
+    instanceInfo:        document.getElementById('instanceInfo'),
+    refreshBtn:          document.getElementById('refreshBtn'),
+    searchInput:         document.getElementById('searchInput'),
+    list:                document.getElementById('list'),
+    noConvPlaceholder:   document.getElementById('noConvPlaceholder'),
+    chatHeader:          document.getElementById('chatHeader'),
+    contactProfile:      document.getElementById('contactProfile'),
+    contactName:         document.getElementById('contactName'),
+    contactPhone:        document.getElementById('contactPhone'),
+    contactState:        document.getElementById('contactState'),
+    pauseToggle:         document.getElementById('pauseToggle'),
+    blockToggle:         document.getElementById('blockToggle'),
+    clearContextBtn:     document.getElementById('clearContextBtn'),
+    agentSettingsBtn:    document.getElementById('agentSettingsBtn'),
+    messages:            document.getElementById('messages'),
+    composerBar:         document.getElementById('composerBar'),
+    textInput:           document.getElementById('textInput'),
+    sendBtn:             document.getElementById('sendBtn'),
+    attachBtn:           document.getElementById('attachBtn'),
+    attachMenu:          document.getElementById('attachMenu'),
+    pickDocumentBtn:     document.getElementById('pickDocumentBtn'),
+    pickMediaBtn:        document.getElementById('pickMediaBtn'),
+    recordBtn:           document.getElementById('recordBtn'),
+    recordLabel:         document.getElementById('recordLabel'),
+    recordDot:           document.getElementById('recordDot'),
+    sendLocationBtn:     document.getElementById('sendLocationBtn'),
+    sendPixBtn:          document.getElementById('sendPixBtn'),
+    sendMenuBtn:         document.getElementById('sendMenuBtn'),
+    emojiBtn:            document.getElementById('emojiBtn'),
+    emojiMenu:           document.getElementById('emojiMenu'),
+    fileInput:           document.getElementById('fileInput'),
+    status:              document.getElementById('status'),
+    agentSettingsModal:  document.getElementById('agentSettingsModal'),
+    bufferSecondsInput:  document.getElementById('bufferSecondsInput'),
+    greetingMessageInput:document.getElementById('greetingMessageInput'),
+    closeAgentSettingsBtn:document.getElementById('closeAgentSettingsBtn'),
     saveAgentSettingsBtn: document.getElementById('saveAgentSettingsBtn'),
+    clearContextModal:   document.getElementById('clearContextModal'),
+    clearContextPhone:   document.getElementById('clearContextPhone'),
+    cancelClearBtn:      document.getElementById('cancelClearBtn'),
+    confirmClearBtn:     document.getElementById('confirmClearBtn'),
   };
 
+  /* ── App state ── */
   const state = {
     tenantId: 'default',
     instance: '',
@@ -41,25 +54,27 @@
     selectedRemoteJid: '',
     selectedConversationKey: '',
     selectedConversation: null,
-    contactInfoOpen: false,
     conversations: [],
-    recorder: null,
-    audioChunks: [],
     poller: null,
-    agentSettings: { bufferWindowMs: 20000, greetingMessage: 'Olá! Como posso ajudar você hoje?' },
     pollListBusy: false,
-    pollMessageBusy: false,
-    lastRenderedStateText: '',
+    pollMsgBusy: false,
+    messagesLimit: 120,
+    loadingMore: false,
+    lastMsgSignature: '',
+    recorder: null,
+    recordStream: null,
+    audioChunks: [],
+    fileMode: 'document',
+    agentSettings: { bufferWindowMs: 20000, greetingMessage: '' },
+    isRecording: false,
   };
 
-  function syncContactPanelVisibility() {
-    if (!ui.appRoot) return;
-    const hasSelection = Boolean(state.selectedPhone) && Boolean(state.contactInfoOpen);
-    ui.appRoot.classList.toggle('contact-selected', hasSelection);
-  }
+  const EMOJIS = ['😊','😂','❤️','👍','🙏','😍','😭','😅','🔥','✨','🎉','👏','😁','🤔','😢','😎','🤣','💪','🙌','😉','😋','🥰','🤗','😌','🥹','😏','🤩','😤','💯','🫡'];
 
-  function escapeHtml(value) {
-    return String(value || '')
+  /* ══════════════════════ HELPERS ══════════════════════ */
+
+  function escapeHtml(v) {
+    return String(v || '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -69,272 +84,246 @@
 
   function setStatus(text, cls) {
     ui.status.textContent = text;
-    ui.status.className = `status ${cls || ''}`;
+    ui.status.className = 'status ' + (cls || '');
   }
 
-  function initialsFromPhone(phone) {
-    const clean = String(phone || '').replace(/\D/g, '');
-    return clean.slice(-2) || '--';
-  }
+  function normalizeDigits(v) { return String(v || '').replace(/\D/g, ''); }
 
-  function displayName(conversation) {
-    const name = String(conversation && conversation.name ? conversation.name : '').trim();
-    return name || String(conversation && conversation.phone ? conversation.phone : '');
-  }
-
-  function renderAvatar(el, conversation) {
-    if (!el) return;
-    const avatarUrl = String(conversation && conversation.avatarUrl ? conversation.avatarUrl : '').trim();
-    if (avatarUrl) {
-      el.innerHTML = `<img src="${escapeHtml(avatarUrl)}" alt="avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />`;
-      return;
+  function initialsFromConversation(conv) {
+    const name = String(conv?.name || '').trim();
+    if (name) {
+      const parts = name.split(/\s+/).filter(Boolean).slice(0, 2);
+      return parts.map(p => p[0]).join('').toUpperCase();
     }
-    el.textContent = initialsFromPhone(conversation && conversation.phone);
+    const d = normalizeDigits(conv?.phone || '');
+    return d.slice(-2) || '';
   }
 
-  function formatTime(iso) {
+  function displayName(conv) {
+    const name = String(conv?.name || '').trim();
+    if (name) return name;
+    return String(conv?.phone || '').trim() || 'Sem nome';
+  }
+
+  const personIconSvg = `<svg viewBox="0 0 24 24" width="22" height="22" fill="#aab8c0"><path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/></svg>`;
+
+  function renderAvatar(el, conv) {
+    if (!el) return;
+    const url = String(conv?.avatarUrl || '').trim();
+    if (url) { el.innerHTML = `<img src="${escapeHtml(url)}" alt="avatar" />`; return; }
+    const initials = initialsFromConversation(conv);
+    if (initials) { el.textContent = initials; }
+    else           { el.innerHTML = personIconSvg; }
+  }
+
+  function formatListDate(iso) {
     if (!iso) return '';
     const dt = new Date(iso);
-    if (Number.isNaN(dt.getTime())) return '';
+    if (isNaN(dt)) return '';
+    const now = new Date();
+    if (dt.toDateString() === now.toDateString())
+      return dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    return dt.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' });
+  }
+
+  function formatBubbleTime(iso) {
+    if (!iso) return '';
+    const dt = new Date(iso);
+    if (isNaN(dt)) return '';
     return dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
   }
 
+  function closeMenus() {
+    ui.attachMenu.classList.remove('open');
+    ui.emojiMenu.classList.remove('open');
+  }
+
+  function isNearBottom(el) {
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }
+
+  function msgSignature(msgs) {
+    if (!Array.isArray(msgs) || !msgs.length) return 'empty';
+    const last = msgs[msgs.length - 1] || {};
+    const first = msgs[0] || {};
+    return `${msgs.length}|${first.at || ''}|${last.at || ''}|${String(last.content || '').slice(0, 60)}`;
+  }
+
+  /* ── Build single message bubble ── */
+  function buildMsgNode(message) {
+    const role = message.role === 'assistant' ? 'assistant' : 'user';
+    const safeText = escapeHtml(message.content || '');
+    const node = document.createElement('div');
+    node.className = `msg ${role}`;
+    node.innerHTML = `<div class="bubble">${safeText}<div class="at">${escapeHtml(formatBubbleTime(message.at))}</div></div>`;
+    return node;
+  }
+
+  /* ── Show/hide conversation view ── */
+  function showConversationView(show) {
+    ui.noConvPlaceholder.style.display = show ? 'none' : 'flex';
+    ui.chatHeader.style.display        = show ? 'flex' : 'none';
+    ui.messages.style.display          = show ? 'block' : 'none';
+    ui.composerBar.style.display       = show ? 'flex' : 'none';
+  }
+
+  /* ══════════════════════ API ══════════════════════ */
+
   async function fetchJson(url, init) {
-    const response = await fetch(url, init);
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data.success === false) {
-      throw new Error(data.error || `HTTP ${response.status}`);
-    }
+    const res = await fetch(url, init);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) throw new Error(data.error || `HTTP ${res.status}`);
     return data;
   }
+
+  /* ══════════════════════ DATA LOADING ══════════════════════ */
 
   async function loadDefaultInstance() {
     try {
       const data = await fetchJson('/api/ana/default-instance?tenant_id=default');
       state.tenantId = data.tenantId || 'default';
       state.instance = data.instance || '';
-      if (data.configuredInstance && data.configuredInstance !== data.instance) {
-        setStatus(`Instância configurada (${data.configuredInstance}) indisponível. Usando ${data.instance}.`, 'warn');
-      }
     } catch (_) {
       state.tenantId = 'default';
       state.instance = '';
     }
-    ui.instanceInfo.textContent = `Instância padrão: ${state.instance || '(não definida)'}`;
-    ui.infoInstance.textContent = state.instance || '-';
+    ui.instanceInfo.textContent = `Instância: ${state.instance || '(não definida)'}`;
   }
 
   async function loadAgentSettings() {
     try {
       const data = await fetchJson(`/api/ana/agent-settings?tenant_id=${encodeURIComponent(state.tenantId)}`);
-      if (data && data.settings) state.agentSettings = data.settings;
+      if (data?.settings) state.agentSettings = data.settings;
     } catch (_) {}
-  }
-
-  function openAgentSettingsModal() {
-    ui.bufferSecondsInput.value = Math.max(3, Math.round(Number(state.agentSettings.bufferWindowMs || 20000) / 1000));
-    ui.greetingMessageInput.value = String(state.agentSettings.greetingMessage || '');
-    ui.agentSettingsModal.classList.add('open');
-  }
-
-  function closeAgentSettingsModal() {
-    ui.agentSettingsModal.classList.remove('open');
-  }
-
-  function renderList() {
-    syncContactPanelVisibility();
-    ui.list.innerHTML = '';
-    for (const conversation of state.conversations) {
-      const rowKey = String(conversation.phone || conversation.remoteJid || '');
-      const item = document.createElement('div');
-      item.className = `item ${state.selectedConversationKey === rowKey ? 'active' : ''}`;
-      const preview = escapeHtml((conversation.lastMessage && conversation.lastMessage.content) || 'Sem mensagens');
-      item.innerHTML = `
-        <div class="avatar">${initialsFromPhone(conversation.phone)}</div>
-        <div>
-          <div class="name">${escapeHtml(displayName(conversation) || conversation.phone)}</div>
-          <div class="preview">${preview}</div>
-        </div>
-        <div class="time">${formatTime(conversation.lastActivityAt)}</div>
-      `;
-      renderAvatar(item.querySelector('.avatar'), conversation);
-      item.onclick = async function () {
-        state.selectedPhone = conversation.phone;
-        state.selectedRemoteJid = conversation.remoteJid || `${conversation.phone}@s.whatsapp.net`;
-        state.selectedConversationKey = rowKey;
-        state.selectedConversation = conversation;
-        state.contactInfoOpen = false;
-        renderList();
-        await loadControls();
-        await loadMessages();
-      };
-      ui.list.appendChild(item);
-    }
   }
 
   async function loadConversations() {
     const search = encodeURIComponent((ui.searchInput.value || '').trim());
-    const data = await fetchJson(`/api/ana/conversations?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&limit=50&search=${search}`);
-
+    const data = await fetchJson(
+      `/api/ana/conversations?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&limit=120&search=${search}`
+    );
     if (data.instance && data.instance !== state.instance) {
       state.instance = data.instance;
-      ui.instanceInfo.textContent = `Instância padrão: ${state.instance || '(não definida)'}`;
-      ui.infoInstance.textContent = state.instance || '-';
+      ui.instanceInfo.textContent = `Instância: ${state.instance || '(não definida)'}`;
     }
-
     state.conversations = data.conversations || [];
     if (state.selectedConversationKey) {
-      state.selectedConversation = state.conversations.find((c) => String(c.phone || c.remoteJid || '') === state.selectedConversationKey) || state.selectedConversation;
-      if (state.selectedConversation && state.selectedConversation.remoteJid) {
-        state.selectedRemoteJid = state.selectedConversation.remoteJid;
-        state.selectedPhone = state.selectedConversation.phone || state.selectedPhone;
+      const found = state.conversations.find(c => String(c.phone || c.remoteJid || '') === state.selectedConversationKey);
+      if (found) {
+        state.selectedConversation = found;
+        state.selectedPhone = found.phone || state.selectedPhone;
+        state.selectedRemoteJid = found.remoteJid || state.selectedRemoteJid;
+      } else {
+        // conversation no longer exists → deselect
+        state.selectedPhone = '';
+        state.selectedRemoteJid = '';
+        state.selectedConversationKey = '';
+        state.selectedConversation = null;
+        state.lastMsgSignature = '';
+        showConversationView(false);
       }
     }
-    if (state.selectedConversationKey && !state.conversations.some((c) => String(c.phone || c.remoteJid || '') === state.selectedConversationKey)) {
-      state.selectedPhone = '';
-      state.selectedRemoteJid = '';
-      state.selectedConversationKey = '';
-    }
-
     renderList();
-
-    if (state.selectedPhone) {
-      await loadControls();
-    } else {
-      state.selectedConversation = null;
-      ui.messages.innerHTML = '';
-      ui.contactAvatar.textContent = '--';
-      ui.contactName.textContent = 'Selecione uma conversa';
-      ui.contactPhone.textContent = 'Sem contato selecionado';
-      ui.contactState.textContent = 'Clique no perfil para ver detalhes';
-      ui.infoAvatar.textContent = '--';
-      ui.infoName.textContent = 'Sem contato';
-      ui.infoPhone.textContent = 'Selecione uma conversa para visualizar os dados.';
-      ui.infoState.textContent = '-';
-      ui.pauseToggle.checked = false;
-      ui.blockToggle.checked = false;
-      ui.pauseToggle.disabled = true;
-      ui.blockToggle.disabled = true;
-      ui.deleteConversationBtn.disabled = true;
-      state.contactInfoOpen = false;
-      syncContactPanelVisibility();
-    }
   }
 
   async function loadControls() {
     if (!state.selectedPhone) return;
-    const c = await fetchJson(`/api/ana/contact-control?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}`);
-    ui.pauseToggle.checked = !!(c.control && c.control.paused);
-    ui.blockToggle.checked = !!(c.control && c.control.blocked);
+    try {
+      const c = await fetchJson(
+        `/api/ana/contact-control?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}`
+      );
+      ui.pauseToggle.disabled = false;
+      ui.blockToggle.disabled = false;
+      ui.pauseToggle.checked = Boolean(c?.control?.paused);
+      ui.blockToggle.checked = Boolean(c?.control?.blocked);
+    } catch (_) {}
   }
 
-  async function loadMessages() {
+  /*
+   * loadMessages — SCROLL FIX
+   * - forceScroll=true  → full redraw + scroll to bottom (use when selecting a new conversation)
+   * - forceRender=true  → full redraw, preserve position (use when loading more history)
+   * - no options        → INCREMENTAL: only appends new messages, never resets scroll position
+   *                       This prevents the scroll-reset bug when the user reads history
+   */
+  async function loadMessages(options = {}) {
     if (!state.selectedPhone) return;
-    const selected = state.selectedConversation || { phone: state.selectedPhone, remoteJid: state.selectedRemoteJid };
-    const readableName = displayName(selected) || state.selectedPhone;
-    renderAvatar(ui.contactAvatar, selected);
-    ui.contactName.textContent = readableName;
-    ui.contactPhone.textContent = state.selectedPhone || '-';
-    if (!state.lastRenderedStateText) {
-      ui.contactState.textContent = `Estado: - | Instância: ${state.instance || '-'}`;
-    }
 
-    renderAvatar(ui.infoAvatar, selected);
-    ui.infoName.textContent = readableName || 'Sem contato';
-    ui.infoPhone.textContent = state.selectedPhone || '-';
-    ui.infoInstance.textContent = state.instance || '-';
-    if (!state.lastRenderedStateText) ui.infoState.textContent = '-';
+    const sel = state.selectedConversation || { phone: state.selectedPhone, remoteJid: state.selectedRemoteJid };
+    renderAvatar(ui.contactProfile, sel);
+    ui.contactName.textContent = displayName(sel);
+    ui.contactPhone.textContent = state.selectedPhone || '—';
 
-    let msgData = { messages: [] };
-    let sessionData = {};
-    msgData = await fetchJson(`/api/ana/messages?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}&remoteJid=${encodeURIComponent(state.selectedRemoteJid || '')}&limit=80`);
-    if (msgData && msgData.remoteJid) {
+    const [msgData, sessionData] = await Promise.all([
+      fetchJson(
+        `/api/ana/messages?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}&remoteJid=${encodeURIComponent(state.selectedRemoteJid || '')}&limit=${state.messagesLimit}`
+      ),
+      fetchJson(
+        `/api/ana/session?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}`
+      ).catch(() => ({})),
+    ]);
+
+    if (msgData?.remoteJid) {
       state.selectedRemoteJid = msgData.remoteJid;
       if (state.selectedConversation) state.selectedConversation.remoteJid = msgData.remoteJid;
     }
-    if (msgData && msgData.avatarUrl && state.selectedConversation) {
-      state.selectedConversation.avatarUrl = msgData.avatarUrl;
+    if (msgData?.avatarUrl && state.selectedConversation) state.selectedConversation.avatarUrl = msgData.avatarUrl;
+    if (msgData?.name && state.selectedConversation) state.selectedConversation.name = msgData.name;
+
+    const convState = sessionData?.state || '';
+    ui.contactState.textContent = convState ? `Estado: ${convState} | Instância: ${state.instance || '—'}` : '';
+
+    const messages = Array.isArray(msgData?.messages) ? msgData.messages : [];
+    const sig = msgSignature(messages);
+
+    // Nothing changed and no force → skip completely (user is scrolling history freely)
+    if (!options.forceRender && !options.forceScroll && sig === state.lastMsgSignature) return;
+
+    const existingCount = ui.messages.querySelectorAll('.msg').length;
+    const wasNearBottom = isNearBottom(ui.messages);
+
+    if (options.forceScroll || options.forceRender || existingCount === 0 || messages.length < existingCount) {
+      // Full rebuild
+      const oldScrollTop = ui.messages.scrollTop;
+      const oldHeight    = ui.messages.scrollHeight;
+
+      ui.messages.innerHTML = '';
+      messages.forEach(m => ui.messages.appendChild(buildMsgNode(m)));
+
+      if (options.forceScroll) {
+        ui.messages.scrollTop = ui.messages.scrollHeight;
+      } else if (wasNearBottom) {
+        ui.messages.scrollTop = ui.messages.scrollHeight;
+      } else if (options.forceRender) {
+        // Loading older history: keep relative position
+        const newHeight = ui.messages.scrollHeight;
+        ui.messages.scrollTop = Math.max(0, oldScrollTop + (newHeight - oldHeight));
+      }
+    } else if (messages.length > existingCount) {
+      // ── INCREMENTAL APPEND ──
+      // Only add the new messages at the end.
+      // If user is scrolled up reading history → DON'T touch scrollTop at all.
+      const toAdd = messages.slice(existingCount);
+      toAdd.forEach(m => ui.messages.appendChild(buildMsgNode(m)));
+      if (wasNearBottom) {
+        ui.messages.scrollTop = ui.messages.scrollHeight;
+      }
+      // else: user is reading history, leave scroll position untouched ✓
     }
-    if (msgData && msgData.name && state.selectedConversation && !state.selectedConversation.name) {
-      state.selectedConversation.name = msgData.name;
-    }
-    sessionData = await fetchJson(`/api/ana/session?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&phone=${encodeURIComponent(state.selectedPhone)}`);
 
-    const conversationState = (sessionData && sessionData.state) || 'INIT';
-    const phone = state.selectedPhone;
-    state.lastRenderedStateText = `Estado: ${conversationState} | Instância: ${state.instance || '-'}`;
-    ui.contactState.textContent = state.lastRenderedStateText;
-    ui.pauseToggle.disabled = false;
-    ui.blockToggle.disabled = false;
-    ui.deleteConversationBtn.disabled = false;
-    ui.infoPhone.textContent = phone;
-    ui.infoInstance.textContent = state.instance || '-';
-    ui.infoState.textContent = conversationState;
-
-    const messages = msgData.messages || [];
-    ui.messages.innerHTML = '';
-
-    for (const message of messages) {
-      const role = message.role === 'assistant' ? 'assistant' : 'user';
-      const safeText = escapeHtml(message.content || '');
-      const el = document.createElement('div');
-      el.className = `msg ${role}`;
-      el.innerHTML = `<div class="bubble">${safeText}<div class="at">${formatTime(message.at)}</div></div>`;
-      ui.messages.appendChild(el);
-    }
-
-    ui.messages.scrollTop = ui.messages.scrollHeight;
+    state.lastMsgSignature = sig;
   }
 
   async function pollSelectedMessages() {
-    if (!state.selectedPhone) return;
-    if (state.pollMessageBusy) return;
-    state.pollMessageBusy = true;
-    try {
-      await loadMessages();
-    } catch (e) {
-      setStatus(`Falha ao sincronizar conversa: ${e.message}`, 'err');
-    } finally {
-      state.pollMessageBusy = false;
-    }
+    if (!state.selectedPhone || state.pollMsgBusy) return;
+    state.pollMsgBusy = true;
+    try { await loadMessages(); }
+    catch (e) { setStatus(`Erro ao sincronizar: ${e.message}`, 'err'); }
+    finally   { state.pollMsgBusy = false; }
   }
 
-  async function saveAgentSettings() {
-    const bufferSeconds = Number(ui.bufferSecondsInput.value || 20);
-    const greetingMessage = String(ui.greetingMessageInput.value || '').trim();
-    const body = {
-      tenant_id: state.tenantId,
-      bufferWindowMs: Math.max(3, Math.min(120, bufferSeconds)) * 1000,
-      greetingMessage,
-    };
-    const data = await fetchJson('/api/ana/agent-settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (data && data.settings) state.agentSettings = data.settings;
-    setStatus('Configurações do agente salvas.', 'ok');
-    closeAgentSettingsModal();
-  }
-
-  async function deleteConversation() {
-    if (!state.selectedPhone && !state.selectedRemoteJid) return;
-    const target = state.selectedConversation ? displayName(state.selectedConversation) : state.selectedPhone;
-    const ok = window.confirm(`Excluir a conversa inteira de "${target}"? Esta ação não pode ser desfeita.`);
-    if (!ok) return;
-
-    await fetchJson(`/api/ana/conversation?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance || '')}&phone=${encodeURIComponent(state.selectedPhone || '')}&remoteJid=${encodeURIComponent(state.selectedRemoteJid || '')}`, {
-      method: 'DELETE',
-    });
-
-    setStatus('Conversa excluída com sucesso.', 'ok');
-    state.selectedPhone = '';
-    state.selectedRemoteJid = '';
-    state.selectedConversationKey = '';
-    state.selectedConversation = null;
-    state.contactInfoOpen = false;
-    await loadConversations();
-  }
+  /* ══════════════════════ ACTIONS ══════════════════════ */
 
   async function updateControl(patch) {
     if (!state.selectedPhone) return;
@@ -351,14 +340,42 @@
     setStatus('Controle atualizado.', 'ok');
   }
 
-  async function sendText() {
-    if (!state.selectedPhone) {
-      setStatus('Selecione uma conversa.', 'warn');
-      return;
-    }
-    const text = (ui.textInput.value || '').trim();
-    if (!text) return;
+  async function saveAgentSettings() {
+    const secs = Number(ui.bufferSecondsInput.value || 20);
+    const msg  = String(ui.greetingMessageInput.value || '').trim();
+    const body = {
+      tenant_id: state.tenantId,
+      bufferWindowMs: Math.max(3, Math.min(120, secs)) * 1000,
+      greetingMessage: msg,
+    };
+    const data = await fetchJson('/api/ana/agent-settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (data?.settings) state.agentSettings = data.settings;
+    setStatus('Configurações salvas.', 'ok');
+    ui.agentSettingsModal.classList.remove('open');
+  }
 
+  async function clearContextAndMemory() {
+    if (!state.selectedPhone) return;
+    await fetchJson('/api/ana/conversation/clear', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tenant_id: state.tenantId, phone: state.selectedPhone }),
+    });
+    ui.clearContextModal.classList.remove('open');
+    state.lastMsgSignature = '';
+    setStatus('Contexto e memória do cliente limpos.', 'ok');
+    await loadConversations();
+    await loadMessages({ forceScroll: true, forceRender: true });
+  }
+
+  async function sendText(text) {
+    if (!state.selectedPhone) { setStatus('Selecione uma conversa.', 'warn'); return; }
+    const content = String(text || ui.textInput.value || '').trim();
+    if (!content) return;
     await fetchJson('/api/ana/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -367,34 +384,32 @@
         instance: state.instance || null,
         phone: state.selectedPhone,
         remoteJid: state.selectedRemoteJid || null,
-        text,
+        text: content,
       }),
     });
-
     ui.textInput.value = '';
+    ui.textInput.style.height = 'auto';
     setStatus('Mensagem enviada.', 'ok');
     await loadConversations();
+    await loadMessages({ forceScroll: true, forceRender: true });
   }
 
   function fileToBase64(file) {
     return new Promise((resolve, reject) => {
       const fr = new FileReader();
-      fr.onload = function () {
-        const dataUrl = String(fr.result || '');
-        resolve(dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl);
+      fr.onload = () => {
+        const r = String(fr.result || '');
+        resolve(r.includes(',') ? r.split(',')[1] : r);
       };
       fr.onerror = reject;
       fr.readAsDataURL(file);
     });
   }
 
-  async function sendFile(file) {
-    if (!state.selectedPhone) {
-      setStatus('Selecione uma conversa.', 'warn');
-      return;
-    }
-
-    const base64 = await fileToBase64(file);
+  async function sendFile(file, mediaKindOverride) {
+    if (!state.selectedPhone) { setStatus('Selecione uma conversa.', 'warn'); return; }
+    const base64    = await fileToBase64(file);
+    const mediaKind = mediaKindOverride || state.fileMode || 'document';
     await fetchJson('/api/ana/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -405,131 +420,317 @@
         remoteJid: state.selectedRemoteJid || null,
         mediaBase64: base64,
         mimeType: file.type || 'application/octet-stream',
-        fileName: file.name || 'arquivo.bin',
+        fileName: file.name || 'arquivo',
+        mediaKind,
         caption: (ui.textInput.value || '').trim(),
       }),
     });
-
-    setStatus('Arquivo/mídia enviado.', 'ok');
+    setStatus('Mídia enviada.', 'ok');
     await loadConversations();
+    await loadMessages({ forceScroll: true, forceRender: true });
+  }
+
+  /* ── Audio recording ── */
+  function pickRecordMime() {
+    const candidates = ['audio/ogg;codecs=opus', 'audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+    for (const m of candidates) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) return m;
+    }
+    return '';
+  }
+
+  function extFromMime(mime) {
+    if (mime.includes('ogg'))  return 'ogg';
+    if (mime.includes('webm')) return 'webm';
+    if (mime.includes('mp4'))  return 'mp4';
+    return 'webm';
+  }
+
+  function setRecordingState(recording) {
+    state.isRecording = recording;
+    ui.recordLabel.textContent = recording ? '⏹ Parar' : 'Áudio';
+    ui.recordDot.style.background = recording ? '#e53935' : '#ff7a1a';
   }
 
   async function toggleRecording() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setStatus('Gravação não suportada.', 'err');
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setStatus('Gravação de áudio não suportada neste navegador.', 'err');
       return;
     }
-
     if (state.recorder && state.recorder.state === 'recording') {
       state.recorder.stop();
       return;
     }
-
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    try {
+      state.recordStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      setStatus(`Permissão de microfone negada: ${e.message}`, 'err');
+      return;
+    }
+    const mimeType = pickRecordMime();
     state.audioChunks = [];
-    state.recorder = new MediaRecorder(stream);
+    try {
+      state.recorder = mimeType
+        ? new MediaRecorder(state.recordStream, { mimeType })
+        : new MediaRecorder(state.recordStream);
+    } catch (e) {
+      setStatus(`Não foi possível iniciar a gravação: ${e.message}`, 'err');
+      state.recordStream.getTracks().forEach(t => t.stop());
+      state.recordStream = null;
+      return;
+    }
 
-    state.recorder.ondataavailable = function (evt) {
+    state.recorder.ondataavailable = (evt) => {
       if (evt.data && evt.data.size > 0) state.audioChunks.push(evt.data);
     };
 
-    state.recorder.onstop = async function () {
+    state.recorder.onstop = async () => {
+      setRecordingState(false);
       try {
-        ui.recordBtn.textContent = 'Gravar';
-        const blob = new Blob(state.audioChunks, { type: state.recorder.mimeType || 'audio/webm' });
-        const file = new File([blob], `audio-${Date.now()}.webm`, { type: blob.type || 'audio/webm' });
-        await sendFile(file);
+        const mime = state.recorder.mimeType || mimeType || 'audio/webm';
+        const blob = new Blob(state.audioChunks, { type: mime });
+        const ext  = extFromMime(mime);
+        const file = new File([blob], `audio-${Date.now()}.${ext}`, { type: mime });
+        await sendFile(file, 'audio');
       } catch (err) {
         setStatus(`Falha no envio de áudio: ${err.message}`, 'err');
       } finally {
-        stream.getTracks().forEach((track) => track.stop());
+        if (state.recordStream) {
+          state.recordStream.getTracks().forEach(t => t.stop());
+          state.recordStream = null;
+        }
       }
     };
 
-    state.recorder.start();
-    ui.recordBtn.textContent = 'Parar';
-    setStatus('Gravando áudio... clique novamente para parar.', 'warn');
+    state.recorder.start(200); // timeslice de 200ms garante ondataavailable
+    setRecordingState(true);
+    setStatus('Gravando áudio... clique em ⏹ Parar para enviar.', 'warn');
+    closeMenus();
   }
 
-  ui.refreshBtn.onclick = function () {
-    loadConversations()
-      .then(() => setStatus('Atualizado.', 'ok'))
-      .catch((e) => setStatus(e.message, 'err'));
-  };
+  async function sendLocationPrompt() {
+    if (!state.selectedPhone) return setStatus('Selecione uma conversa.', 'warn');
+    const loc = window.prompt('Informe a localização (ex: https://maps.google.com/?q=-16.68,-49.25 ou endereço):');
+    if (!loc) return;
+    await sendText(`📍 Localização: ${loc}`);
+  }
 
-  ui.searchInput.oninput = function () {
-    loadConversations().catch((e) => setStatus(e.message, 'err'));
-  };
+  async function sendPixPrompt() {
+    if (!state.selectedPhone) return setStatus('Selecione uma conversa.', 'warn');
+    const key = window.prompt('Informe a chave Pix:');
+    if (!key) return;
+    const amount = window.prompt('Valor (opcional, ex: R$ 35,00):') || '';
+    await sendText(`💳 Pix\nChave: ${key}${amount ? `\nValor: ${amount}` : ''}`);
+  }
 
-  ui.contactProfile.onclick = function () {
-    if (!state.selectedPhone) return;
-    state.contactInfoOpen = !state.contactInfoOpen;
-    syncContactPanelVisibility();
-  };
+  async function sendMenuShortcut() {
+    if (!state.selectedPhone) return setStatus('Selecione uma conversa.', 'warn');
+    await sendText('📋 Cardápio');
+  }
 
-  ui.agentSettingsBtn.onclick = function () {
-    openAgentSettingsModal();
-  };
+  /* ══════════════════════ RENDERING ══════════════════════ */
 
-  ui.closeAgentSettingsBtn.onclick = function () {
-    closeAgentSettingsModal();
-  };
+  function renderEmojiMenu() {
+    ui.emojiMenu.innerHTML = '';
+    for (const emoji of EMOJIS) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'emoji-item';
+      btn.textContent = emoji;
+      btn.onclick = () => {
+        ui.textInput.value += emoji;
+        ui.textInput.focus();
+        ui.textInput.dispatchEvent(new Event('input'));
+      };
+      ui.emojiMenu.appendChild(btn);
+    }
+  }
 
-  ui.saveAgentSettingsBtn.onclick = function () {
-    saveAgentSettings().catch((e) => setStatus(e.message, 'err'));
-  };
+  function renderList() {
+    ui.list.innerHTML = '';
+    for (const conv of state.conversations) {
+      const rowKey = String(conv.phone || conv.remoteJid || '');
+      const item = document.createElement('div');
+      item.className = 'conv-item' + (state.selectedConversationKey === rowKey ? ' active' : '');
 
-  ui.agentSettingsModal.onclick = function (e) {
-    if (e.target === ui.agentSettingsModal) closeAgentSettingsModal();
-  };
+      // Avatar
+      const avEl = document.createElement('div');
+      avEl.className = 'conv-av';
+      if (conv.avatarUrl) {
+        avEl.innerHTML = `<img src="${escapeHtml(conv.avatarUrl)}" alt="avatar" />`;
+      } else {
+        const initials = initialsFromConversation(conv);
+        if (initials) avEl.textContent = initials;
+        else avEl.innerHTML = personIconSvg;
+      }
 
-  ui.pauseToggle.onchange = function () {
-    updateControl({ paused: ui.pauseToggle.checked }).catch((e) => setStatus(e.message, 'err'));
-  };
+      // Body
+      const body = document.createElement('div');
+      body.className = 'conv-body';
+      body.innerHTML = `
+        <div class="conv-row">
+          <div class="conv-name">${escapeHtml(displayName(conv))}</div>
+          <div class="conv-time">${escapeHtml(formatListDate(conv.lastActivityAt))}</div>
+        </div>
+        <div class="conv-preview">${escapeHtml((conv?.lastMessage?.content || '').slice(0, 100))}</div>
+      `;
 
-  ui.blockToggle.onchange = function () {
-    updateControl({ blocked: ui.blockToggle.checked }).catch((e) => setStatus(e.message, 'err'));
-  };
+      item.appendChild(avEl);
+      item.appendChild(body);
 
-  ui.sendBtn.onclick = function () {
-    sendText().catch((e) => setStatus(e.message, 'err'));
-  };
+      item.onclick = async () => {
+        closeMenus();
+        state.selectedPhone           = conv.phone;
+        state.selectedRemoteJid       = conv.remoteJid || `${conv.phone}@s.whatsapp.net`;
+        state.selectedConversationKey = rowKey;
+        state.selectedConversation    = conv;
+        state.messagesLimit           = 120;
+        state.lastMsgSignature        = '';
 
-  ui.attachBtn.onclick = function () {
-    ui.fileInput.click();
-  };
+        showConversationView(true);
+        ui.clearContextBtn.style.display = 'inline-flex';
+        renderList();
+        await loadControls();
+        await loadMessages({ forceScroll: true });
+      };
 
-  ui.fileInput.onchange = function () {
-    const file = ui.fileInput.files && ui.fileInput.files[0];
-    if (!file) return;
-    sendFile(file)
-      .catch((e) => setStatus(e.message, 'err'))
-      .finally(() => {
-        ui.fileInput.value = '';
-      });
-  };
+      ui.list.appendChild(item);
+    }
+  }
 
-  ui.recordBtn.onclick = function () {
-    toggleRecording().catch((e) => setStatus(e.message, 'err'));
-  };
+  /* ══════════════════════ EVENTS ══════════════════════ */
 
-  ui.deleteConversationBtn.onclick = function () {
-    deleteConversation().catch((e) => setStatus(e.message, 'err'));
-  };
+  function bindEvents() {
+
+    /* Refresh button */
+    ui.refreshBtn.onclick = () => {
+      loadConversations()
+        .then(() => setStatus('Lista atualizada.', 'ok'))
+        .catch(e => setStatus(e.message, 'err'));
+    };
+
+    /* Search */
+    ui.searchInput.oninput = () => loadConversations().catch(e => setStatus(e.message, 'err'));
+
+    /* Pause / Block toggles */
+    ui.pauseToggle.onchange = () => {
+      updateControl({ paused: ui.pauseToggle.checked }).catch(e => setStatus(e.message, 'err'));
+      setStatus(ui.pauseToggle.checked ? 'Agente Ana desabilitada para este contato.' : 'Agente Ana reativada.', 'warn');
+    };
+    ui.blockToggle.onchange = () => {
+      updateControl({ blocked: ui.blockToggle.checked }).catch(e => setStatus(e.message, 'err'));
+    };
+
+    /* Clear context */
+    ui.clearContextBtn.onclick = () => {
+      if (!state.selectedPhone) return;
+      const label = displayName(state.selectedConversation || { phone: state.selectedPhone });
+      ui.clearContextPhone.textContent = `Contato: ${label}`;
+      ui.clearContextModal.classList.add('open');
+    };
+    ui.cancelClearBtn.onclick  = () => ui.clearContextModal.classList.remove('open');
+    ui.confirmClearBtn.onclick = () => clearContextAndMemory().catch(e => setStatus(e.message, 'err'));
+    ui.clearContextModal.onclick = e => { if (e.target === ui.clearContextModal) ui.clearContextModal.classList.remove('open'); };
+
+    /* Agent settings */
+    ui.agentSettingsBtn.onclick = () => {
+      ui.bufferSecondsInput.value   = Math.max(3, Math.round(Number(state.agentSettings.bufferWindowMs || 20000) / 1000));
+      ui.greetingMessageInput.value = String(state.agentSettings.greetingMessage || '');
+      ui.agentSettingsModal.classList.add('open');
+    };
+    ui.closeAgentSettingsBtn.onclick = () => ui.agentSettingsModal.classList.remove('open');
+    ui.saveAgentSettingsBtn.onclick  = () => saveAgentSettings().catch(e => setStatus(e.message, 'err'));
+    ui.agentSettingsModal.onclick = e => { if (e.target === ui.agentSettingsModal) ui.agentSettingsModal.classList.remove('open'); };
+
+    /* Send */
+    ui.sendBtn.onclick = () => sendText().catch(e => setStatus(e.message, 'err'));
+    ui.textInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendText().catch(err => setStatus(err.message, 'err'));
+      }
+    });
+
+    /* Textarea auto-resize */
+    ui.textInput.addEventListener('input', function () {
+      this.style.height = 'auto';
+      this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+    });
+
+    /* Attachment / emoji toggles */
+    ui.attachBtn.onclick = () => {
+      ui.emojiMenu.classList.remove('open');
+      ui.attachMenu.classList.toggle('open');
+    };
+    ui.emojiBtn.onclick = () => {
+      ui.attachMenu.classList.remove('open');
+      ui.emojiMenu.classList.toggle('open');
+    };
+
+    /* Attach-menu items */
+    ui.pickDocumentBtn.onclick = () => {
+      state.fileMode = 'document';
+      ui.fileInput.accept = '.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip,.rar,application/*';
+      ui.fileInput.click();
+      closeMenus();
+    };
+    ui.pickMediaBtn.onclick = () => {
+      state.fileMode = 'image';
+      ui.fileInput.accept = 'image/*,video/*';
+      ui.fileInput.click();
+      closeMenus();
+    };
+    ui.recordBtn.onclick     = () => toggleRecording().catch(e => setStatus(e.message, 'err'));
+    ui.sendLocationBtn.onclick = () => { closeMenus(); sendLocationPrompt().catch(e => setStatus(e.message, 'err')); };
+    ui.sendPixBtn.onclick      = () => { closeMenus(); sendPixPrompt().catch(e => setStatus(e.message, 'err')); };
+    ui.sendMenuBtn.onclick     = () => { closeMenus(); sendMenuShortcut().catch(e => setStatus(e.message, 'err')); };
+
+    /* File input */
+    ui.fileInput.onchange = () => {
+      const file = ui.fileInput.files?.[0];
+      if (!file) return;
+      sendFile(file).catch(e => setStatus(e.message, 'err')).finally(() => { ui.fileInput.value = ''; });
+    };
+
+    /* Load-more history when scrolled to top */
+    ui.messages.addEventListener('scroll', () => {
+      if (!state.selectedPhone || state.loadingMore) return;
+      if (ui.messages.scrollTop > 80) return;
+      if (state.messagesLimit >= 300) return;
+      state.loadingMore = true;
+      state.messagesLimit = Math.min(300, state.messagesLimit + 80);
+      loadMessages({ forceRender: true, forceScroll: false })
+        .catch(e => setStatus(e.message, 'err'))
+        .finally(() => { state.loadingMore = false; });
+    });
+
+    /* Close menus on outside click */
+    document.addEventListener('click', e => {
+      const inAttach = e.target === ui.attachBtn || ui.attachBtn.contains(e.target) || ui.attachMenu.contains(e.target);
+      const inEmoji  = e.target === ui.emojiBtn  || ui.emojiBtn.contains(e.target)  || ui.emojiMenu.contains(e.target);
+      if (!inAttach) ui.attachMenu.classList.remove('open');
+      if (!inEmoji)  ui.emojiMenu.classList.remove('open');
+    });
+  }
+
+  /* ══════════════════════ BOOT ══════════════════════ */
 
   async function boot() {
     try {
+      showConversationView(false);
+      renderEmojiMenu();
+      bindEvents();
       await loadDefaultInstance();
       await loadAgentSettings();
       await loadConversations();
-      setStatus('Inbox pronta. Carregadas as últimas 50 conversas.', 'ok');
+      setStatus('Inbox pronta. Conversas ativas sincronizadas.', 'ok');
 
       if (state.poller) clearInterval(state.poller);
-      state.poller = setInterval(function () {
+      state.poller = setInterval(() => {
         if (!state.pollListBusy) {
           state.pollListBusy = true;
           loadConversations()
-            .catch((e) => setStatus(e.message, 'err'))
+            .catch(e => setStatus(e.message, 'err'))
             .finally(() => { state.pollListBusy = false; });
         }
         pollSelectedMessages();
