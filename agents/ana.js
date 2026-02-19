@@ -70,15 +70,15 @@ const normalizeStateUF = (value) => {
   const map = {
     GOIAS: 'GO',
     GOIÁS: 'GO',
-    SAO PAULO: 'SP',
-    SÃO PAULO: 'SP',
-    RIO DE JANEIRO: 'RJ',
-    MINAS GERAIS: 'MG',
+    'SAO PAULO': 'SP',
+    'SÃO PAULO': 'SP',
+    'RIO DE JANEIRO': 'RJ',
+    'MINAS GERAIS': 'MG',
     PARANA: 'PR',
     PARANÁ: 'PR',
-    SANTA CATARINA: 'SC',
-    RIO GRANDE DO SUL: 'RS',
-    DISTRITO FEDERAL: 'DF',
+    'SANTA CATARINA': 'SC',
+    'RIO GRANDE DO SUL': 'RS',
+    'DISTRITO FEDERAL': 'DF',
   };
   return map[raw] || '';
 };
