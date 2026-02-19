@@ -188,6 +188,14 @@ const apiRequest = async (environment, method, path, body = null, tenant = null)
 const normalizePhone = (value) => String(value || '').replace(/\D/g, '');
 const safeTrim = (value) => String(value || '').trim();
 const isLikelyPhoneDigits = (value) => /^\d{10,15}$/.test(String(value || ''));
+const normalizeCanonicalPhone = (value) => {
+    const digits = normalizePhone(value || '');
+    if (!digits) return '';
+    if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) return digits;
+    if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+    if (digits.length >= 10 && digits.length <= 15) return digits;
+    return '';
+};
 
 const findSessionByRemoteJid = (tenantId, remoteJid) => {
     const target = String(remoteJid || '').trim().toLowerCase();
@@ -201,18 +209,32 @@ const findSessionByRemoteJid = (tenantId, remoteJid) => {
 };
 
 const resolveCanonicalPhone = ({ tenantId, phone, remoteJid }) => {
-    const p = normalizePhone(phone || '');
+    const p = normalizeCanonicalPhone(phone || '');
     if (isLikelyPhoneDigits(p)) return p;
 
     const byJid = findSessionByRemoteJid(tenantId, remoteJid);
-    if (byJid?.phone && isLikelyPhoneDigits(byJid.phone)) return normalizePhone(byJid.phone);
+    if (byJid?.phone) {
+        const normalized = normalizeCanonicalPhone(byJid.phone);
+        if (isLikelyPhoneDigits(normalized)) return normalized;
+    }
 
-    const fromJid = normalizePhone(String(remoteJid || '').split('@')[0] || '');
+    const fromJid = normalizeCanonicalPhone(String(remoteJid || '').split('@')[0] || '');
     if (isLikelyPhoneDigits(fromJid)) return fromJid;
+
+    const rawDigits = normalizePhone(phone || '');
+    if (rawDigits.length >= 8) {
+        const suffix = rawDigits.slice(-8);
+        for (const session of anaSessions.values()) {
+            if (String(session?.tenantId || 'default') !== String(tenantId || 'default')) continue;
+            const candidate = normalizeCanonicalPhone(session?.phone || '');
+            if (!isLikelyPhoneDigits(candidate)) continue;
+            if (candidate.endsWith(suffix)) return candidate;
+        }
+    }
     return '';
 };
 
-const getContactKey = (tenantId, phone) => `${tenantId}:${normalizePhone(phone)}`;
+const getContactKey = (tenantId, phone) => `${tenantId}:${normalizeCanonicalPhone(phone) || normalizePhone(phone)}`;
 
 const getContactControl = (tenantId, phone) => {
     const key = getContactKey(tenantId, phone);
@@ -427,7 +449,7 @@ const fetchEvolutionChats = async ({ apiUrl, apiKey, instance, limit = 50 }) => 
 
             return chats.slice(0, limit).map((chat) => {
                 const remoteJid = extractRemoteJidFromChat(chat);
-                const phone = String(remoteJid).split('@')[0].replace(/\D/g, '');
+                const phone = normalizeCanonicalPhone(String(remoteJid).split('@')[0] || '');
                 const lastMessageText = extractTextFromAnyMessage(chat?.lastMessage || chat?.message || chat);
                 const ts = chat?.conversationTimestamp || chat?.timestamp || chat?.t || chat?.lastMessageTimestamp || null;
                 const at = ts ? new Date(Number(ts) > 9999999999 ? Number(ts) : Number(ts) * 1000).toISOString() : null;
@@ -457,7 +479,7 @@ const fetchEvolutionChats = async ({ apiUrl, apiKey, instance, limit = 50 }) => 
                     lastMessage: { role: 'user', content: String(lastMessageText || '').slice(0, 280), at },
                     lastActivityAt: at,
                 };
-            }).filter((c) => c.phone);
+            }).filter((c) => isLikelyPhoneDigits(c.phone));
         } catch (_) {
             // try next endpoint
         }
@@ -541,7 +563,7 @@ const fetchEvolutionContacts = async ({ apiUrl, apiKey, instance, limit = 50 }) 
                     row?.jid ||
                     row?.key?.remoteJid ||
                     '';
-                const phone = String(remoteJid).split('@')[0].replace(/\D/g, '');
+                const phone = normalizeCanonicalPhone(String(remoteJid).split('@')[0] || '');
                 const name =
                     row?.pushName ||
                     row?.name ||
@@ -568,7 +590,7 @@ const fetchEvolutionContacts = async ({ apiUrl, apiKey, instance, limit = 50 }) 
                     lastMessage: null,
                     lastActivityAt: null,
                 };
-            }).filter((c) => c.phone);
+            }).filter((c) => isLikelyPhoneDigits(c.phone));
         } catch (_) {
             // try next endpoint
         }
@@ -891,7 +913,7 @@ app.get('/api/tenants', (_req, res) => {
  */
 app.get('/api/ana/session', (req, res) => {
     const phoneRaw = String(req.query.phone || '').trim();
-    const phone = phoneRaw.replace(/\D/g, '');
+    const phone = normalizeCanonicalPhone(phoneRaw);
     if (!phone) {
         return res.status(400).json({ success: false, error: 'Parametro "phone" e obrigatorio' });
     }
@@ -933,7 +955,7 @@ app.post('/api/ana/simulate', async (req, res) => {
     try {
         const phoneRaw = String(req.body?.phone || '').trim();
         const text = String(req.body?.text || '').trim();
-        const phone = phoneRaw.replace(/\D/g, '');
+        const phone = normalizeCanonicalPhone(phoneRaw);
 
         if (!phone || !text) {
             return res.status(400).json({ success: false, error: 'Campos "phone" e "text" sao obrigatorios' });
@@ -1098,7 +1120,8 @@ app.get('/api/ana/conversations', (req, res) => {
                 paused: control.paused,
                 blocked: control.blocked,
             };
-        });
+        })
+        .filter((row) => isLikelyPhoneDigits(row.phone));
 
     const buildResponse = async () => {
         const availableInstances = await fetchEvolutionInstances({ apiUrl: evo.apiUrl, apiKey: evo.apiKey });
@@ -1135,10 +1158,11 @@ app.get('/api/ana/conversations', (req, res) => {
                 phone: row.phone,
                 remoteJid: row.remoteJid,
             });
+            if (!isLikelyPhoneDigits(canonicalPhone)) continue;
             const control = getContactControl(tenantId, canonicalPhone);
             const normalizedRow = {
                 ...row,
-                phone: canonicalPhone || normalizePhone(row.phone || ''),
+                phone: canonicalPhone,
             };
             merged.set(mergeKey(normalizedRow), {
                 phone: normalizedRow.phone,
@@ -1156,6 +1180,7 @@ app.get('/api/ana/conversations', (req, res) => {
 
         for (const row of inMemoryRows) {
             if (!row?.phone && !row?.remoteJid) continue;
+            if (!isLikelyPhoneDigits(row.phone)) continue;
             const key = mergeKey(row);
             const current = merged.get(key) || {};
             merged.set(key, {
@@ -2028,7 +2053,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
         const participantJid = key.participant || payload.participant || payload?.messages?.[0]?.key?.participant || '';
         const sourceJid = String(remoteJid).endsWith('@g.us') && participantJid ? participantJid : remoteJid;
         const tenantId = tenant?.id || 'default';
-        const rawPhone = String(sourceJid || '').split('@')[0].replace(/\D/g, '');
+        const rawPhone = normalizeCanonicalPhone(String(sourceJid || '').split('@')[0] || '');
         const phone = resolveCanonicalPhone({
             tenantId,
             phone: rawPhone,
