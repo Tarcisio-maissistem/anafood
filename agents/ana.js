@@ -62,6 +62,13 @@ const formatBRL = (n) => {
   if (!Number.isFinite(v)) return 'R$ 0,00';
   return `R$ ${v.toFixed(2).replace('.', ',')}`;
 };
+const normalizeForMatch = (v) => String(v || '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase()
+  .replace(/[^a-z0-9\s]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
 
 const normalizeStateUF = (value) => {
   const raw = cleanText(value).toUpperCase();
@@ -98,8 +105,7 @@ function extractAddressFromText(text) {
 
   const neighborhoodMatch = raw.match(/\b(?:bairro|setor|jd|jardim|parque)\s+([^,]+)/i);
   if (neighborhoodMatch) {
-    const prefix = /\b(jd|jardim|parque|setor)\b/i.exec(neighborhoodMatch[0]);
-    out.neighborhood = cleanText(prefix ? `${prefix[0]} ${neighborhoodMatch[1]}` : neighborhoodMatch[1]);
+    out.neighborhood = cleanText(neighborhoodMatch[1]);
   }
 
   const cityUfSlash = raw.match(/\b([A-Za-zÀ-ÿ\s]+)\s*\/\s*([A-Za-z]{2})\b/);
@@ -380,6 +386,47 @@ function normalizeCatalogFromCompanyMenu(menuRows) {
     });
   }
   return items;
+}
+
+function inferItemsFromMenu(message, menuRows) {
+  const text = normalizeForMatch(message);
+  if (!text || !Array.isArray(menuRows) || !menuRows.length) return [];
+  const qtyWords = { um: 1, uma: 1, dois: 2, duas: 2, tres: 3, quatro: 4, cinco: 5 };
+  const chunks = text.split(/\s+e\s+|,/g).map((s) => s.trim()).filter(Boolean);
+  const results = [];
+  const used = new Set();
+
+  for (let chunk of chunks) {
+    const qtyMatch = chunk.match(/\b(\d+|um|uma|dois|duas|tres|quatro|cinco)\b/);
+    const qtyRaw = qtyMatch ? qtyMatch[1] : '';
+    const quantity = qtyRaw ? (Number(qtyRaw) || qtyWords[qtyRaw] || 1) : 1;
+    chunk = chunk
+      .replace(/\b(quero|gostaria|pedido|me ve|me vê|pra|para|de|do|da|uma|um|duas|dois|tres|quatro|cinco|\d+)\b/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!chunk) continue;
+
+    let best = null;
+    let bestScore = 0;
+    for (const item of menuRows) {
+      const name = normalizeForMatch(item?.name);
+      if (!name) continue;
+      const chunkInName = name.includes(chunk);
+      const nameInChunk = chunk.includes(name);
+      if (!chunkInName && !nameInChunk) continue;
+      const score = Math.min(name.length, chunk.length);
+      if (score > bestScore) {
+        bestScore = score;
+        best = item;
+      }
+    }
+    if (!best) continue;
+    const key = normalizeForMatch(best.name);
+    if (used.has(key)) continue;
+    used.add(key);
+    results.push({ name: cleanText(best.name), quantity: Math.max(1, quantity) });
+  }
+  return results;
 }
 
 async function normalizeMessageBlock({ rawText, rawMessage }) {
@@ -1036,6 +1083,10 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
     return map[first] || 'Me passe os dados faltantes para continuar.';
   }
   if (action === 'ANSWER_AND_RESUME') {
+    const lastUser = cleanText(conversation?.messages?.slice(-1)?.[0]?.content || '').toLowerCase();
+    if (/^ja (falei|informei)|^já (falei|informei)/.test(lastUser)) {
+      return 'Entendi. Para eu continuar sem erro, me passe os itens no formato: "1 prato do dia e 1 coca cola lata".';
+    }
     const next = fallbackText(runtime, 'ASK_MISSING_FIELDS', tx, missing, conversation);
     return `Respondendo sua pergunta rapidamente: posso ajudar com isso. Agora, ${next.charAt(0).toLowerCase()}${next.slice(1)}`;
   }
@@ -1123,6 +1174,12 @@ function buildContextualAnswer(conversation, userMessage = '') {
   }
 
   if (/\b(entrega|delivery|bairro|taxa)\b/.test(text)) {
+    const bairroMatch = text.match(/bairro\s+([a-z0-9\s]+)/i);
+    if (bairroMatch && deliveryAreas.length) {
+      const asked = normalizeForMatch(bairroMatch[1]);
+      const found = deliveryAreas.find((a) => normalizeForMatch(a.neighborhood).includes(asked) || asked.includes(normalizeForMatch(a.neighborhood)));
+      if (found) return `A taxa para ${found.neighborhood} é ${formatBRL(found.fee)}.`;
+    }
     if (deliveryAreas.length) {
       const sample = deliveryAreas.slice(0, 5).map((a) => `${a.neighborhood} (${formatBRL(a.fee)})`).join(', ');
       return `Entregamos em: ${sample}.`;
@@ -1349,6 +1406,10 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
 
   const classification = await classifierAgent({ runtime, conversation, groupedText: normalized.normalizedText || groupedText });
   const extracted = classification.requires_extraction ? await extractorAgent({ runtime, groupedText: normalized.normalizedText || groupedText }) : {};
+  if (runtime.segment === 'restaurant' && (!Array.isArray(extracted.items) || extracted.items.length === 0)) {
+    const inferred = inferItemsFromMenu(normalized.normalizedText || groupedText, conversation?.companyData?.menu || []);
+    if (inferred.length) extracted.items = inferred;
+  }
   log('INFO', 'Ana: classification/extraction', {
     tenantId: runtime.id,
     phone: conversation.phone,
