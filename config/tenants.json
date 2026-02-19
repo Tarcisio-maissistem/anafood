@@ -1,22 +1,24 @@
 {
-  "defaultTenantId": "default",
+  "defaultTenantId": "anafood",
   "tenants": [
     {
-      "id": "default",
-      "name": "Empresa Demo",
+      "id": "anafood",
+      "name": "Ana Food",
+      "subdomain": "anafood",
       "active": true,
-      "environment": "homologation",
+      "environment": "production",
       "business": {
         "segment": "restaurant",
         "restaurant": {
           "requireAddress": true,
-          "orderProvider": "saipos"
+          "orderProvider": "saipos",
+          "openingHours": "Seg a Dom, 10:00 as 23:00"
         }
       },
       "agent": {
         "name": "Ana",
         "personality": "atendente simpatica, objetiva e consultiva",
-        "customPrompt": "Sempre confirme os dados do pedido antes de finalizar e use linguagem clara."
+        "customPrompt": "Conduza o pedido de forma natural e objetiva. Responda perguntas laterais e retome o proximo dado faltante."
       },
       "saipos": {
         "homologation": {
@@ -35,19 +37,20 @@
       "evolution": {
         "apiUrl": "${EVOLUTION_API_URL}",
         "apiKey": "${EVOLUTION_API_KEY}",
-        "instance": "Teste03"
+        "instance": "Ana food"
       },
       "integrations": {
         "supabase": {
           "url": "${SUPABASE_URL}",
           "serviceRoleKey": "${SUPABASE_SERVICE_ROLE_KEY}",
-          "companyId": "${COMPANY_MCP_COMPANY_ID}",
+          "companyId": "",
           "companyTable": "companies",
           "companyLookupKey": "id",
           "menuTable": "products",
           "paymentTable": "payment_methods",
           "deliveryTable": "delivery_fees",
-          "tenantFilterKey": "company_id"
+          "tenantFilterKey": "company_id",
+          "filterValue": ""
         },
         "anafood": {
           "endpoint": "${ANAFOOD_API_URL}",
@@ -55,6 +58,67 @@
           "companyKey": "${ANAFOOD_COMPANY_KEY}",
           "apiToken": "${ANAFOOD_API_TOKEN}",
           "companyId": "${ANAFOOD_COMPANY_ID}",
+          "companyHeader": "${ANAFOOD_COMPANY_HEADER}"
+        }
+      }
+    },
+    {
+      "id": "demo-2",
+      "name": "Demo Cliente 2",
+      "subdomain": "cliente2",
+      "active": true,
+      "environment": "production",
+      "business": {
+        "segment": "restaurant",
+        "restaurant": {
+          "requireAddress": true,
+          "orderProvider": "saipos",
+          "openingHours": "Seg a Sab, 11:00 as 22:00"
+        }
+      },
+      "agent": {
+        "name": "Ana",
+        "personality": "educada e resolutiva",
+        "customPrompt": "Foque em reduzir perguntas desnecessarias e coletar somente dados faltantes."
+      },
+      "saipos": {
+        "homologation": {
+          "baseUrl": "${HOMOLOG_API_URL}",
+          "idPartner": "${HOMOLOG_ID_PARTNER}",
+          "secret": "${HOMOLOG_SECRET}",
+          "codStore": "${HOMOLOG_COD_STORE_CLIENTE2}"
+        },
+        "production": {
+          "baseUrl": "${PRODUCTION_API_URL}",
+          "idPartner": "${PRODUCTION_ID_PARTNER}",
+          "secret": "${PRODUCTION_SECRET}",
+          "codStore": "${PRODUCTION_COD_STORE_CLIENTE2}"
+        }
+      },
+      "evolution": {
+        "apiUrl": "${EVOLUTION_API_URL}",
+        "apiKey": "${EVOLUTION_API_KEY}",
+        "instance": "Cliente2"
+      },
+      "integrations": {
+        "supabase": {
+          "url": "${SUPABASE_URL}",
+          "serviceRoleKey": "${SUPABASE_SERVICE_ROLE_KEY}",
+          "companyId": "",
+          "companyTable": "companies",
+          "companyLookupKey": "id",
+          "menuTable": "products",
+          "paymentTable": "payment_methods",
+          "deliveryTable": "delivery_fees",
+          "tenantFilterKey": "company_id",
+          "filterValue": ""
+        },
+        "anafood": {
+          "endpoint": "${ANAFOOD_API_URL_CLIENTE2}",
+          "authMode": "company_key",
+          "companyKey": "${ANAFOOD_COMPANY_KEY_CLIENTE2}",
+          "apiToken": "${ANAFOOD_API_TOKEN_CLIENTE2}",
+          "companyId": "${ANAFOOD_COMPANY_ID_CLIENTE2}",
           "companyHeader": "${ANAFOOD_COMPANY_HEADER}"
         }
       }
