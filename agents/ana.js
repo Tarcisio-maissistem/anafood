@@ -146,7 +146,24 @@ function setAgentSettings(tenantId = 'default', patch = {}) {
 function getCustomer(tenantId, phone) {
   const key = `${tenantId}:${phone}`;
   let c = customers.get(key);
-  if (!c) { c = { id: key, tenantId, phone, createdAt: nowISO(), updatedAt: nowISO(), totalOrders: 0 }; customers.set(key, c); }
+  if (!c) {
+    c = {
+      id: key,
+      tenantId,
+      phone,
+      name: '',
+      createdAt: nowISO(),
+      updatedAt: nowISO(),
+      totalOrders: 0,
+      lastOrderSnapshot: null,
+      lastOrderSummary: '',
+    };
+    customers.set(key, c);
+  }
+  if (typeof c.totalOrders !== 'number') c.totalOrders = 0;
+  if (typeof c.name !== 'string') c.name = '';
+  if (typeof c.lastOrderSummary !== 'string') c.lastOrderSummary = '';
+  if (typeof c.lastOrderSnapshot === 'undefined') c.lastOrderSnapshot = null;
   c.updatedAt = nowISO();
   return c;
 }
@@ -179,6 +196,10 @@ function getConversation(phone, tenantId = 'default') {
       },
       confirmed: {},
       pendingFieldConfirmation: null,
+      awaitingRepeatChoice: false,
+      lastRepeatOfferDate: '',
+      repeatPreview: '',
+      orderStoredForCustomer: false,
       greeted: false,
       messages: [],
       catalog: null,
@@ -187,6 +208,10 @@ function getConversation(phone, tenantId = 'default') {
   }
   if (!conv.confirmed || typeof conv.confirmed !== 'object') conv.confirmed = {};
   if (typeof conv.pendingFieldConfirmation === 'undefined') conv.pendingFieldConfirmation = null;
+  if (typeof conv.awaitingRepeatChoice !== 'boolean') conv.awaitingRepeatChoice = false;
+  if (typeof conv.lastRepeatOfferDate !== 'string') conv.lastRepeatOfferDate = '';
+  if (typeof conv.repeatPreview !== 'string') conv.repeatPreview = '';
+  if (typeof conv.orderStoredForCustomer !== 'boolean') conv.orderStoredForCustomer = false;
   conv.lastActivityAt = nowISO();
   return conv;
 }
@@ -413,7 +438,76 @@ function fieldConfirmationValue(tx, field) {
   return '-';
 }
 
-function orchestrate({ runtime, conversation, classification, extracted, groupedText }) {
+function buildOrderSnapshot(tx) {
+  return {
+    customer_name: cleanText(tx.customer_name || ''),
+    mode: tx.mode || '',
+    notes: cleanText(tx.notes || ''),
+    payment: tx.payment || '',
+    items: Array.isArray(tx.items) ? tx.items.map((i) => ({
+      name: cleanText(i.name || ''),
+      quantity: toNumberOrOne(i.quantity),
+      integration_code: i.integration_code || null,
+      unit_price: Number(i.unit_price || 0) || null,
+    })).filter((i) => i.name) : [],
+    address: {
+      street_name: cleanText(tx.address?.street_name || ''),
+      street_number: cleanText(tx.address?.street_number || ''),
+      neighborhood: cleanText(tx.address?.neighborhood || ''),
+      city: cleanText(tx.address?.city || ''),
+      state: cleanText(tx.address?.state || ''),
+      postal_code: cleanText(tx.address?.postal_code || ''),
+    },
+  };
+}
+
+function formatOrderPreview(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.items) || snapshot.items.length === 0) return '';
+  const items = snapshot.items.map((i) => `${i.quantity}x ${i.name}`).join(', ');
+  const mode = snapshot.mode === 'TAKEOUT' ? 'Retirada' : 'Delivery';
+  return `${items} | ${mode} | Pagamento: ${snapshot.payment || '-'}`;
+}
+
+function applySnapshotToConversation(conversation, snapshot) {
+  if (!snapshot) return;
+  conversation.transaction.customer_name = cleanText(snapshot.customer_name || '');
+  conversation.transaction.mode = snapshot.mode || '';
+  conversation.transaction.notes = cleanText(snapshot.notes || '');
+  conversation.transaction.payment = snapshot.payment || '';
+  conversation.transaction.items = Array.isArray(snapshot.items)
+    ? snapshot.items.map((i) => ({
+      name: cleanText(i.name || ''),
+      quantity: toNumberOrOne(i.quantity),
+      integration_code: i.integration_code || null,
+      unit_price: Number(i.unit_price || 0) || null,
+    })).filter((i) => i.name)
+    : [];
+  conversation.transaction.address = {
+    street_name: cleanText(snapshot.address?.street_name || ''),
+    street_number: cleanText(snapshot.address?.street_number || ''),
+    neighborhood: cleanText(snapshot.address?.neighborhood || ''),
+    city: cleanText(snapshot.address?.city || ''),
+    state: cleanText(snapshot.address?.state || ''),
+    postal_code: cleanText(snapshot.address?.postal_code || ''),
+  };
+  const allConfirmed = {
+    customer_name: true,
+    items: true,
+    notes: true,
+    mode: true,
+    payment: true,
+    'address.street_name': true,
+    'address.street_number': true,
+    'address.neighborhood': true,
+    'address.city': true,
+    'address.state': true,
+    'address.postal_code': true,
+  };
+  conversation.confirmed = allConfirmed;
+  conversation.pendingFieldConfirmation = null;
+}
+
+function orchestrate({ runtime, conversation, customer, classification, extracted, groupedText }) {
   if (runtime.segment === 'restaurant') mergeRestaurantTransaction(conversation, extracted || {});
 
   const handoff = classification.handoff
@@ -438,8 +532,35 @@ function orchestrate({ runtime, conversation, classification, extracted, grouped
   }
 
   if (s === STATES.INIT) {
+    const today = nowISO().slice(0, 10);
+    const hasPreviousOrder = Boolean(customer?.lastOrderSnapshot && Array.isArray(customer.lastOrderSnapshot.items) && customer.lastOrderSnapshot.items.length);
+
+    if (conversation.awaitingRepeatChoice && hasPreviousOrder) {
+      if (yes) {
+        applySnapshotToConversation(conversation, customer.lastOrderSnapshot);
+        conversation.awaitingRepeatChoice = false;
+        return { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
+      }
+      if (no) {
+        conversation.awaitingRepeatChoice = false;
+        conversation.repeatPreview = '';
+      } else {
+        return {
+          nextState: STATES.INIT,
+          action: hasQuestion ? 'ANSWER_AND_RESUME_REPEAT' : 'ASK_REPEAT_LAST_ORDER',
+          missing: [],
+        };
+      }
+    }
+
+    if (hasPreviousOrder && conversation.lastRepeatOfferDate !== today) {
+      conversation.lastRepeatOfferDate = today;
+      conversation.awaitingRepeatChoice = true;
+      conversation.repeatPreview = customer.lastOrderSummary || formatOrderPreview(customer.lastOrderSnapshot);
+      return { nextState: STATES.INIT, action: 'ASK_REPEAT_LAST_ORDER', missing: [] };
+    }
+
     if (i === INTENTS.SAUDACAO) {
-      const today = nowISO().slice(0, 10);
       if (runtime.greetingOncePerDay && conversation.lastGreetingDate === today) {
         if (conversation.pendingFieldConfirmation) {
           return {
@@ -723,8 +844,13 @@ async function createOrderByProviderIfNeeded({ conversation, runtime, apiRequest
   return createSaiposOrder({ conversation, runtime, apiRequest, getEnvConfig, log });
 }
 
-function fallbackText(runtime, action, tx, missing) {
+function fallbackText(runtime, action, tx, missing, conversation = null) {
   if (action === 'WELCOME') return `Ola! Eu sou ${runtime.agentName}. Posso ajudar com um novo pedido ou tirar duvidas.`;
+  if (action === 'ASK_REPEAT_LAST_ORDER') {
+    const preview = cleanText(conversation?.repeatPreview || '');
+    if (preview) return `Encontrei seu ultimo pedido: ${preview}. Deseja repetir esse pedido? Responda sim ou nao.`;
+    return 'Vi que voce ja fez pedido conosco. Deseja repetir o ultimo pedido? Responda sim ou nao.';
+  }
   if (action === 'ASK_FIELD_CONFIRMATION') {
     const field = (missing || [])[0];
     if (!field) return 'Pode confirmar esse dado?';
@@ -748,11 +874,15 @@ function fallbackText(runtime, action, tx, missing) {
     return map[first] || 'Me passe os dados faltantes para continuar.';
   }
   if (action === 'ANSWER_AND_RESUME') {
-    const next = fallbackText(runtime, 'ASK_MISSING_FIELDS', tx, missing);
+    const next = fallbackText(runtime, 'ASK_MISSING_FIELDS', tx, missing, conversation);
     return `Respondendo sua pergunta rapidamente: posso ajudar com isso. Agora, ${next.charAt(0).toLowerCase()}${next.slice(1)}`;
   }
   if (action === 'ANSWER_AND_RESUME_CONFIRM') {
-    const next = fallbackText(runtime, 'ASK_FIELD_CONFIRMATION', tx, missing);
+    const next = fallbackText(runtime, 'ASK_FIELD_CONFIRMATION', tx, missing, conversation);
+    return `Respondendo sua pergunta rapidamente: posso ajudar com isso. Agora, ${next.charAt(0).toLowerCase()}${next.slice(1)}`;
+  }
+  if (action === 'ANSWER_AND_RESUME_REPEAT') {
+    const next = fallbackText(runtime, 'ASK_REPEAT_LAST_ORDER', tx, missing, conversation);
     return `Respondendo sua pergunta rapidamente: posso ajudar com isso. Agora, ${next.charAt(0).toLowerCase()}${next.slice(1)}`;
   }
   if (action === 'ORDER_REVIEW') {
@@ -783,7 +913,7 @@ async function generatorAgent({ runtime, conversation, classification, orchestra
     userMessage: groupedText || '',
   };
   if (!openai) {
-    return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing);
+    return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing, conversation);
   }
   try {
     const c = await openai.chat.completions.create({
@@ -799,9 +929,9 @@ async function generatorAgent({ runtime, conversation, classification, orchestra
       ],
     });
     const text = cleanText(c.choices?.[0]?.message?.content || '');
-    return text || fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing);
+    return text || fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing, conversation);
   } catch (_) {
-    return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing);
+    return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing, conversation);
   }
 }
 
@@ -963,7 +1093,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   await maybeLoadCatalog(conversation, runtime, apiRequest, getEnvConfig, log);
 
   const previousState = conversation.state;
-  const orchestratorResult = orchestrate({ runtime, conversation, classification, extracted, groupedText: normalized.normalizedText || groupedText });
+  const orchestratorResult = orchestrate({ runtime, conversation, customer, classification, extracted, groupedText: normalized.normalizedText || groupedText });
   conversation.state = orchestratorResult.nextState;
   log('INFO', 'Ana: orchestration', {
     tenantId: runtime.id,
@@ -1016,7 +1146,17 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     if (orchestratorResult.action === 'CREATE_ORDER_AND_CONFIRM') {
       customer.totalOrders = (customer.totalOrders || 0) + 1;
       conversation.consecutiveFailures = 0;
+      customer.lastOrderSnapshot = buildOrderSnapshot(conversation.transaction);
+      customer.lastOrderSummary = formatOrderPreview(customer.lastOrderSnapshot);
+      conversation.orderStoredForCustomer = true;
     }
+  }
+  if (orchestratorResult.action === 'PAYMENT_CONFIRMED' && !conversation.orderStoredForCustomer) {
+    customer.totalOrders = (customer.totalOrders || 0) + 1;
+    customer.lastOrderSnapshot = buildOrderSnapshot(conversation.transaction);
+    customer.lastOrderSummary = formatOrderPreview(customer.lastOrderSnapshot);
+    conversation.orderStoredForCustomer = true;
+    conversation.consecutiveFailures = 0;
   }
 
   const reply = orchestratorResult.action === 'WELCOME'
@@ -1028,7 +1168,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
           ? Boolean(cleanText(conversation.transaction.address?.[String(firstMissing).slice('address.'.length)]))
           : Boolean(cleanText(conversation.transaction[firstMissing]));
       const followUpAction = hasPendingValue ? 'ASK_FIELD_CONFIRMATION' : 'ASK_MISSING_FIELDS';
-      const followUp = fallbackText(runtime, followUpAction, conversation.transaction, orchestratorResult.missing || []);
+      const followUp = fallbackText(runtime, followUpAction, conversation.transaction, orchestratorResult.missing || [], conversation);
       return followUp ? `${runtime.greetingMessage} ${followUp}`.trim() : runtime.greetingMessage;
     })()
     : await generatorAgent({ runtime, conversation, classification, orchestratorResult, groupedText: normalized.normalizedText || groupedText });
@@ -1129,6 +1269,16 @@ async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvCon
   const runtime = tenantRuntime(tenant, { instance: instanceName || undefined });
   const customer = getCustomer(runtime.id, phone);
   const conversation = getConversation(phone, runtime.id);
+  const cleanContactName = cleanText(contactName || '').replace(/\s+/g, ' ');
+  if (cleanContactName && !/^\+?\d[\d\s()-]+$/.test(cleanContactName)) {
+    customer.name = cleanContactName;
+  }
+  if (!cleanText(customer.name) && cleanText(conversation.contactName)) {
+    customer.name = cleanText(conversation.contactName);
+  }
+  if (!cleanText(conversation.transaction.customer_name) && cleanText(customer.name)) {
+    conversation.transaction.customer_name = cleanText(customer.name);
+  }
   const inboundId = String(
     messageId ||
     rawMessage?.key?.id ||
