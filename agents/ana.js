@@ -278,6 +278,39 @@ function normalizeCatalog(rawCatalog) {
   return items;
 }
 
+function normalizeCatalogFromCompanyMenu(menuRows) {
+  const list = Array.isArray(menuRows) ? menuRows : [];
+  const seen = new Set();
+  const items = [];
+  for (const row of list) {
+    const name = cleanText(row?.name || row?.item || row?.desc_item || '');
+    if (!name) continue;
+    const code = cleanText(
+      row?.integration_code
+      || row?.codigo_saipos
+      || row?.cod_item
+      || row?.code
+      || row?.external_code
+      || row?.id_store_item
+      || row?.id
+      || name
+    );
+    if (seen.has(code)) continue;
+    seen.add(code);
+    const unitPriceFromRow = Number(row?.unit_price || 0);
+    const unitPrice = Number.isFinite(unitPriceFromRow) && unitPriceFromRow > 0
+      ? Math.round(unitPriceFromRow)
+      : Math.round((Number(row?.price || row?.valor || 0) || 0) * 100);
+    items.push({
+      integration_code: String(code),
+      name,
+      unit_price: unitPrice,
+      price_display: `R$ ${(unitPrice / 100).toFixed(2)}`,
+    });
+  }
+  return items;
+}
+
 async function normalizeMessageBlock({ rawText, rawMessage }) {
   const baseText = cleanText(rawText);
   const hasAudio = Boolean(rawMessage?.audioMessage || rawMessage?.pttMessage || rawMessage?.voiceMessage);
@@ -714,15 +747,13 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
 async function maybeLoadCatalog(conversation, runtime, apiRequest, getEnvConfig, log) {
   if (runtime.segment !== 'restaurant') return [];
   if (Array.isArray(conversation.catalog) && conversation.catalog.length) return conversation.catalog;
-  try {
-    const cfg = getEnvConfig(runtime.environment);
-    const raw = await apiRequest(runtime.environment, 'GET', `/catalog?cod_store=${cfg.codStore}`);
-    conversation.catalog = normalizeCatalog(raw);
-    log('INFO', `Ana: catalogo carregado (${conversation.catalog.length} itens)`, { tenantId: runtime.id, phone: conversation.phone });
-  } catch (err) {
-    log('ERROR', 'Ana: falha ao carregar catalogo', { err: err.message, tenantId: runtime.id, phone: conversation.phone });
-    conversation.catalog = [];
-  }
+  const mcpMenu = Array.isArray(conversation?.companyData?.menu) ? conversation.companyData.menu : [];
+  conversation.catalog = normalizeCatalogFromCompanyMenu(mcpMenu);
+  log('INFO', `Ana: catalogo carregado do Supabase/products (${conversation.catalog.length} itens)`, {
+    tenantId: runtime.id,
+    phone: conversation.phone,
+    source: conversation?.companyData?.meta?.menuSource || 'supabase',
+  });
   return conversation.catalog;
 }
 
