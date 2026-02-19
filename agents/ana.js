@@ -1149,13 +1149,41 @@ function buildContextualAnswer(conversation, userMessage = '') {
   const deliveryAreas = Array.isArray(mcp?.deliveryAreas) ? mcp.deliveryAreas : [];
 
   if (/\b(endereco|endereço|localiza[cç][aã]o)\b/.test(text)) {
-    const address = cleanText(company.address || '');
+    const address = (() => {
+      if (typeof company.address === 'string') return cleanText(company.address);
+      if (company.address && typeof company.address === 'object') {
+        const a = company.address;
+        return cleanText([
+          a.logradouro || a.street || a.street_name || '',
+          a.numero || a.number || a.street_number || '',
+          a.bairro || a.neighborhood || '',
+          a.cidade || a.city || '',
+          a.estado || a.state || '',
+          a.cep || a.postal_code || '',
+        ].filter(Boolean).join(', '));
+      }
+      return '';
+    })();
     if (address) return `Nosso endereço é: ${address}.`;
     return 'Posso te passar o endereço assim que estiver cadastrado no sistema.';
   }
 
   if (/\b(horario|funcionamento|abre|fecha)\b/.test(text)) {
-    const opening = cleanText(company.openingHours || '');
+    const opening = (() => {
+      if (typeof company.openingHours === 'string') return cleanText(company.openingHours);
+      if (company.openingHours && typeof company.openingHours === 'object') {
+        const order = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+        const label = { monday: 'Seg', tuesday: 'Ter', wednesday: 'Qua', thursday: 'Qui', friday: 'Sex', saturday: 'Sab', sunday: 'Dom' };
+        const parts = [];
+        for (const d of order) {
+          const row = company.openingHours[d];
+          if (!row || row.closed) continue;
+          if (row.open && row.close) parts.push(`${label[d]} ${row.open}-${row.close}`);
+        }
+        return cleanText(parts.join(' | '));
+      }
+      return '';
+    })();
     if (opening) return `Nosso horário de funcionamento é: ${opening}.`;
     return 'Ainda não tenho o horário cadastrado no sistema.';
   }
@@ -1421,7 +1449,8 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   if (runtime.segment === 'restaurant') {
     const inferred = inferItemsFromMenu(normalized.normalizedText || groupedText, conversation?.companyData?.menu || []);
     const currentItems = Array.isArray(extracted.items) ? extracted.items : [];
-    if (inferred.length && inferred.length >= currentItems.length) {
+    const hasJoinedItem = currentItems.some((i) => /\s+e\s+/.test(String(i?.name || '').toLowerCase()));
+    if (inferred.length && (inferred.length >= currentItems.length || hasJoinedItem)) {
       extracted.items = inferred;
     }
   }
