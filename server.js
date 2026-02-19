@@ -12,6 +12,7 @@ const {
     sessions: anaSessions,
 } = require('./agents/ana');
 const { resolveTenant, listTenants } = require('./lib/tenants');
+const { loadCompanyData } = require('./lib/company-data-mcp');
 
 const app = express();
 const PORT = process.env.PORT || 3993;
@@ -1061,6 +1062,39 @@ app.get('/api/ana/agent-settings', (req, res) => {
 });
 
 /**
+ * GET /api/ana/mcp/company-data
+ * Exibe dados operacionais da empresa carregados via MCP (Supabase/fallback).
+ * Query: tenant_id?, instance?
+ */
+app.get('/api/ana/mcp/company-data', async (req, res) => {
+    const tenant = resolveTenant({
+        tenantId: req.query?.tenant_id || req.query?.tenant || null,
+        instanceName: req.query?.instance || null,
+    });
+    const tenantId = tenant?.id || 'default';
+    const boundApiRequest = (environment, method, apiPath, body = null) =>
+        apiRequest(environment, method, apiPath, body, tenant);
+    const boundGetEnvConfig = (environment) => getEnvConfig(environment, tenant);
+
+    const data = await loadCompanyData({
+        tenant,
+        tenantId,
+        apiRequest: boundApiRequest,
+        getEnvConfig: boundGetEnvConfig,
+    });
+
+    return res.json({
+        success: true,
+        tenantId,
+        company: data.company || {},
+        menuCount: Array.isArray(data.menu) ? data.menu.length : 0,
+        paymentMethodCount: Array.isArray(data.paymentMethods) ? data.paymentMethods.length : 0,
+        deliveryAreaCount: Array.isArray(data.deliveryAreas) ? data.deliveryAreas.length : 0,
+        data,
+    });
+});
+
+/**
  * POST /api/ana/agent-settings
  * Body: { tenant_id?, bufferWindowMs?, greetingMessage? }
  */
@@ -2090,6 +2124,12 @@ app.post('/webhook/whatsapp', async (req, res) => {
             payload?.senderName ||
             payload?.profileName ||
             '';
+        const avatarUrl =
+            payload?.profilePicUrl ||
+            payload?.profilePictureUrl ||
+            payload?.picture ||
+            payload?.avatar ||
+            '';
         const unwrapMessage = (m) =>
             m?.ephemeralMessage?.message
             || m?.viewOnceMessage?.message
@@ -2147,6 +2187,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
             instanceName,
             remoteJid,
             contactName,
+            avatarUrl,
             messageId,
             onSend: ({ phone: sentPhone, text: sentText, remoteJid: sentRemoteJid, instance: sentInstance }) => {
                 logConversationEvent({
@@ -2194,6 +2235,7 @@ const apiOverview = () => ({
         anaMessages:     'GET  /api/ana/messages',
         anaDefaultInst:  'GET  /api/ana/default-instance',
         anaAgentSettings:'GET/POST /api/ana/agent-settings',
+        anaMcpData:      'GET  /api/ana/mcp/company-data',
         anaContactCtrl:  'GET/POST /api/ana/contact-control',
         anaSend:         'POST /api/ana/send',
         anaDeleteConv:   'DELETE /api/ana/conversation',

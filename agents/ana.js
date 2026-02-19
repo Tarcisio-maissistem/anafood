@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { OpenAI } = require('openai');
+const { loadCompanyData } = require('../lib/company-data-mcp');
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 const BUFFER_WINDOW_MS = Number(process.env.MESSAGE_BUFFER_MS || 20000);
@@ -107,6 +108,8 @@ function tenantRuntime(tenant, runtimeOverrides = {}) {
     menuHint: cleanText(restaurantCfg.menuHint || restaurantCfg.menuDescription || ''),
     supportInfo: cleanText(restaurantCfg.supportInfo || ''),
     paymentInfo: cleanText(restaurantCfg.paymentInfo || ''),
+    paymentMethods: Array.isArray(restaurantCfg.paymentMethods) ? restaurantCfg.paymentMethods : [],
+    deliveryAreas: Array.isArray(restaurantCfg.deliveryAreas) ? restaurantCfg.deliveryAreas : [],
   };
   return {
     id: tenantId,
@@ -124,6 +127,14 @@ function tenantRuntime(tenant, runtimeOverrides = {}) {
     delivery: { requireAddress: tenant?.business?.restaurant?.requireAddress !== false },
     orderProvider: (tenant?.business?.restaurant?.orderProvider || 'saipos').toLowerCase(),
     companyContext,
+    supabase: {
+      url: tenant?.integrations?.supabase?.url || process.env.SUPABASE_URL || '',
+      serviceRoleKey: tenant?.integrations?.supabase?.serviceRoleKey || process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+      menuTable: tenant?.integrations?.supabase?.menuTable || process.env.COMPANY_MCP_MENU_TABLE || '',
+      paymentTable: tenant?.integrations?.supabase?.paymentTable || process.env.COMPANY_MCP_PAYMENT_TABLE || '',
+      deliveryTable: tenant?.integrations?.supabase?.deliveryTable || process.env.COMPANY_MCP_DELIVERY_TABLE || '',
+      tenantFilterKey: tenant?.integrations?.supabase?.tenantFilterKey || process.env.COMPANY_MCP_TENANT_FILTER_KEY || 'tenant_id',
+    },
     anafood: {
       endpoint: tenant?.integrations?.anafood?.endpoint || process.env.ANAFOOD_API_URL || '',
       authMode: (tenant?.integrations?.anafood?.authMode || process.env.ANAFOOD_AUTH_MODE || 'company_key').toLowerCase(),
@@ -281,8 +292,10 @@ async function normalizeMessageBlock({ rawText, rawMessage }) {
 async function classifierAgent({ runtime, conversation, groupedText }) {
   const lower = groupedText.toLowerCase();
   if (/atendente|humano|pessoa/.test(lower)) return { intent: INTENTS.HUMANO, requires_extraction: false, handoff: true, confidence: 1 };
-  if (/oi|ola|olá|bom dia|boa tarde|boa noite/.test(lower)) return { intent: INTENTS.SAUDACAO, requires_extraction: false, handoff: false, confidence: 0.8 };
-  if (/quero|pedido|comprar|marmita|pizza|lanche|agendar|marcar/.test(lower)) return { intent: INTENTS.NOVO_PEDIDO, requires_extraction: true, handoff: false, confidence: 0.75 };
+  const hasOrderSignal = /quero|pedido|comprar|marmita|pizza|lanche|agendar|marcar/.test(lower);
+  const hasGreetingSignal = /oi|ola|olá|bom dia|boa tarde|boa noite/.test(lower);
+  if (hasOrderSignal) return { intent: INTENTS.NOVO_PEDIDO, requires_extraction: true, handoff: false, confidence: hasGreetingSignal ? 0.9 : 0.8 };
+  if (hasGreetingSignal) return { intent: INTENTS.SAUDACAO, requires_extraction: false, handoff: false, confidence: 0.8 };
   if (/pix|cartao|cartão|paguei|pagamento/.test(lower)) return { intent: INTENTS.PAGAMENTO, requires_extraction: true, handoff: false, confidence: 0.7 };
   if (/cancel/.test(lower)) return { intent: INTENTS.CANCELAMENTO, requires_extraction: false, handoff: false, confidence: 0.7 };
 
@@ -338,12 +351,24 @@ async function extractorAgent({ runtime, groupedText }) {
     if (name) out.items.push({ name, quantity: toNumberOrOne(m[1]) });
   }
 
+  if (!out.items.length) {
+    const naturalOrder = groupedText.match(/(?:quero|gostaria|pedido|me vê|me ve)\s+(?:uma|um)?\s*(.{3,100})/i);
+    if (naturalOrder) {
+      const rawName = cleanText(naturalOrder[1])
+        .replace(/\b(pra|para)\s+(retirar|retirada|entrega|delivery)\b/gi, '')
+        .replace(/\b(no|na)\s+(pix|cart[aã]o|credito|debito|dinheiro)\b/gi, '')
+        .trim();
+      if (rawName && /(marmita|pizza|lanche|pedido)/i.test(rawName)) {
+        out.items.push({ name: rawName, quantity: 1 });
+      }
+    }
+  }
+
   return out;
 }
 
 function markFieldChanged(conv, field) {
   conv.confirmed[field] = false;
-  if (!conv.pendingFieldConfirmation) conv.pendingFieldConfirmation = field;
 }
 
 function mergeRestaurantTransaction(conv, extracted) {
@@ -402,18 +427,15 @@ function mergeRestaurantTransaction(conv, extracted) {
 
 function restaurantMissingFields(runtime, tx, confirmed = {}) {
   const missing = [];
-  if (!cleanText(tx.customer_name) || confirmed.customer_name !== true) missing.push('customer_name');
   if (!Array.isArray(tx.items) || tx.items.length === 0) missing.push('items');
   if (Array.isArray(tx.items) && tx.items.some((i) => !Number(i.quantity) || Number(i.quantity) <= 0)) missing.push('items');
-  if (Array.isArray(tx.items) && tx.items.length > 0 && confirmed.items !== true) missing.push('items');
-  if (!cleanText(tx.notes) || confirmed.notes !== true) missing.push('notes');
-  if (!tx.mode || confirmed.mode !== true) missing.push('mode');
+  if (!tx.mode) missing.push('mode');
   if (tx.mode === 'DELIVERY' && runtime.delivery.requireAddress) {
     for (const f of ['street_name', 'street_number', 'neighborhood', 'city', 'state', 'postal_code']) {
-      if (!cleanText(tx.address?.[f]) || confirmed[`address.${f}`] !== true) missing.push(`address.${f}`);
+      if (!cleanText(tx.address?.[f])) missing.push(`address.${f}`);
     }
   }
-  if (!tx.payment || confirmed.payment !== true) missing.push('payment');
+  if (!tx.payment) missing.push('payment');
   return missing;
 }
 
@@ -530,6 +552,7 @@ function applySnapshotToConversation(conversation, snapshot) {
 
 function orchestrate({ runtime, conversation, customer, classification, extracted, groupedText }) {
   if (runtime.segment === 'restaurant') mergeRestaurantTransaction(conversation, extracted || {});
+  if (runtime.segment === 'restaurant') conversation.pendingFieldConfirmation = null;
 
   const handoff = classification.handoff
     || classification.intent === INTENTS.HUMANO
@@ -879,12 +902,16 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   }
   if (action === 'ASK_MISSING_FIELDS') {
     const first = (missing || [])[0];
+    const mcp = conversation?.companyData || {};
+    const payments = Array.isArray(mcp?.paymentMethods) && mcp.paymentMethods.length
+      ? mcp.paymentMethods.join(' ou ')
+      : 'PIX ou cartao';
     const map = {
       customer_name: 'Para começar, qual é o seu nome?',
       items: 'Quais itens e quantidades voce deseja?',
       notes: 'Deseja adicionar alguma observacao ou complemento? Se nao, responda "sem observacoes".',
       mode: 'Seu pedido é para retirada ou delivery?',
-      payment: 'Qual forma de pagamento voce prefere: PIX ou cartao?',
+      payment: `Qual forma de pagamento voce prefere: ${payments}?`,
       'address.street_name': 'Qual e o nome da rua para entrega?',
       'address.street_number': 'Qual e o numero do endereco?',
       'address.neighborhood': 'Qual e o bairro?',
@@ -940,6 +967,7 @@ async function generatorAgent({ runtime, conversation, customer, classification,
       lastOrderSummary: cleanText(customer?.lastOrderSummary || ''),
     },
     companyContext: runtime.companyContext || {},
+    companyMcp: conversation.companyData || {},
   };
   if (!openai) {
     return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing, conversation);
@@ -952,7 +980,7 @@ async function generatorAgent({ runtime, conversation, customer, classification,
       messages: [
         {
           role: 'system',
-          content: `Voce e ${runtime.agentName}. Tom: ${runtime.tone}. Regras: responda perguntas laterais brevemente e retome imediatamente a pergunta pendente do fluxo. Faça apenas 1 pergunta por resposta. Nao invente itens, valores ou regras. Nao finalize sem confirmacao explicita. Use dados da empresa somente se vierem no contexto. Quando faltarem dados, peça de forma natural e menos robotica.`,
+          content: `Voce e ${runtime.agentName}. Tom: ${runtime.tone}. Regras: responda perguntas laterais brevemente e retome imediatamente a pergunta pendente do fluxo. Faça apenas 1 pergunta por resposta. Nao invente itens, valores ou regras. Nao finalize sem confirmacao explicita. Nao peca confirmacao de nome logo no inicio. So pergunte endereco quando tipo for DELIVERY. Use companyMcp para horario, endereco, cardapio, pagamentos e bairros de entrega.`,
         },
         {
           role: 'user',
@@ -1115,6 +1143,28 @@ async function sendWhatsAppMessage(phone, text, runtime, remoteJid = null) {
 }
 
 async function runPipeline({ conversation, customer, groupedText, normalized, runtime, apiRequest, getEnvConfig, log, onSend = null }) {
+  try {
+    conversation.companyData = await loadCompanyData({
+      tenant: {
+        id: runtime.id,
+        name: runtime.name,
+        environment: runtime.environment,
+        business: {
+          restaurant: {
+            ...runtime.companyContext,
+            requireAddress: runtime.delivery?.requireAddress,
+            openingHours: runtime.companyContext?.openingHours,
+            address: runtime.companyContext?.address,
+          },
+        },
+        integrations: { supabase: { ...runtime.supabase } },
+      },
+      tenantId: runtime.id,
+      apiRequest,
+      getEnvConfig,
+    });
+  } catch (_) {}
+
   const classification = await classifierAgent({ runtime, conversation, groupedText: normalized.normalizedText || groupedText });
   const extracted = classification.requires_extraction ? await extractorAgent({ runtime, groupedText: normalized.normalizedText || groupedText }) : {};
   log('INFO', 'Ana: classification/extraction', {
@@ -1302,7 +1352,7 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
   }, runtime.bufferWindowMs || BUFFER_WINDOW_MS);
 }
 
-async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvConfig, log, tenant, rawMessage = null, instanceName = null, remoteJid = null, contactName = '', messageId = '', onSend = null }) {
+async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvConfig, log, tenant, rawMessage = null, instanceName = null, remoteJid = null, contactName = '', avatarUrl = '', messageId = '', onSend = null }) {
   const runtime = tenantRuntime(tenant, { instance: instanceName || undefined });
   const customer = getCustomer(runtime.id, phone);
   const conversation = getConversation(phone, runtime.id);
@@ -1347,6 +1397,7 @@ async function handleWhatsAppMessage(phone, messageText, { apiRequest, getEnvCon
   }
   if (remoteJid) conversation.remoteJid = remoteJid;
   if (contactName) conversation.contactName = contactName;
+  if (avatarUrl) conversation.avatarUrl = avatarUrl;
   log('INFO', 'Ana: enqueue message', {
     tenantId: runtime.id,
     phone,
