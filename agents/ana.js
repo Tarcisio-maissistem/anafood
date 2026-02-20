@@ -15,13 +15,41 @@ const SUMMARY_EVERY_N_MESSAGES = Number(process.env.SUMMARY_EVERY_N_MESSAGES || 
 
 const STATES = {
   INIT: 'INIT',
-  COLLECTING_DATA: 'COLLECTING_DATA',
-  WAITING_CONFIRMATION: 'WAITING_CONFIRMATION',
+  MENU: 'MENU',
+  ADICIONANDO_ITEM: 'ADICIONANDO_ITEM',
+  CONFIRMANDO_CARRINHO: 'CONFIRMANDO_CARRINHO',
+  COLETANDO_ENDERECO: 'COLETANDO_ENDERECO',
+  COLETANDO_PAGAMENTO: 'COLETANDO_PAGAMENTO',
+  FINALIZANDO: 'FINALIZANDO',
   WAITING_PAYMENT: 'WAITING_PAYMENT',
   CONFIRMED: 'CONFIRMED',
   HUMAN_HANDOFF: 'HUMAN_HANDOFF',
   CLOSED: 'CLOSED',
+  // Aliases de compatibilidade (código legado usa estes nomes)
+  get COLLECTING_DATA() { return 'ADICIONANDO_ITEM'; },
+  get WAITING_CONFIRMATION() { return 'FINALIZANDO'; },
 };
+
+// Mapa de transições válidas — cada estado lista os destinos permitidos
+const VALID_TRANSITIONS = {
+  [STATES.INIT]: [STATES.MENU, STATES.ADICIONANDO_ITEM, STATES.CONFIRMANDO_CARRINHO, STATES.FINALIZANDO, STATES.HUMAN_HANDOFF, STATES.CLOSED],
+  [STATES.MENU]: [STATES.ADICIONANDO_ITEM, STATES.INIT, STATES.HUMAN_HANDOFF, STATES.CLOSED],
+  [STATES.ADICIONANDO_ITEM]: [STATES.CONFIRMANDO_CARRINHO, STATES.MENU, STATES.ADICIONANDO_ITEM, STATES.INIT, STATES.HUMAN_HANDOFF, STATES.CLOSED],
+  [STATES.CONFIRMANDO_CARRINHO]: [STATES.COLETANDO_ENDERECO, STATES.COLETANDO_PAGAMENTO, STATES.ADICIONANDO_ITEM, STATES.INIT, STATES.HUMAN_HANDOFF, STATES.CLOSED],
+  [STATES.COLETANDO_ENDERECO]: [STATES.COLETANDO_PAGAMENTO, STATES.CONFIRMANDO_CARRINHO, STATES.ADICIONANDO_ITEM, STATES.INIT, STATES.HUMAN_HANDOFF, STATES.CLOSED],
+  [STATES.COLETANDO_PAGAMENTO]: [STATES.FINALIZANDO, STATES.COLETANDO_ENDERECO, STATES.ADICIONANDO_ITEM, STATES.INIT, STATES.HUMAN_HANDOFF, STATES.CLOSED],
+  [STATES.FINALIZANDO]: [STATES.WAITING_PAYMENT, STATES.CONFIRMED, STATES.ADICIONANDO_ITEM, STATES.INIT, STATES.HUMAN_HANDOFF, STATES.CLOSED],
+  [STATES.WAITING_PAYMENT]: [STATES.CONFIRMED, STATES.FINALIZANDO, STATES.ADICIONANDO_ITEM, STATES.INIT, STATES.HUMAN_HANDOFF, STATES.CLOSED],
+  [STATES.CONFIRMED]: [STATES.CONFIRMED, STATES.INIT, STATES.HUMAN_HANDOFF],
+  [STATES.HUMAN_HANDOFF]: [STATES.INIT, STATES.HUMAN_HANDOFF],
+  [STATES.CLOSED]: [STATES.INIT],
+};
+
+function isValidTransition(from, to) {
+  if (from === to) return true;
+  const allowed = VALID_TRANSITIONS[from];
+  return allowed ? allowed.includes(to) : true; // permissivo para estados desconhecidos
+}
 
 const INTENTS = {
   SAUDACAO: 'SAUDACAO',
@@ -305,7 +333,7 @@ function persistStateDebounced() {
         conversations: Array.from(conversations.entries()),
         updatedAt: nowISO(),
       }, null, 2), 'utf8');
-    } catch (_) {}
+    } catch (_) { }
   }, 500);
 }
 function loadState() {
@@ -314,7 +342,7 @@ function loadState() {
     const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     for (const [k, v] of (parsed.customers || [])) customers.set(k, v);
     for (const [k, v] of (parsed.conversations || [])) conversations.set(k, v);
-  } catch (_) {}
+  } catch (_) { }
 }
 loadState();
 
@@ -776,12 +804,12 @@ function extractItemsFromFreeText(text) {
     items.push({ name: cleanedName, quantity: Math.max(1, quantity) });
   }
 
+  // Deduplica itens com mesmo nome — mantém a ÚLTIMA quantidade mencionada (set, não soma)
   const merged = new Map();
   for (const item of items) {
     const key = normalizeForMatch(item.name);
-    const prev = merged.get(key);
-    if (prev) prev.quantity += toNumberOrOne(item.quantity);
-    else merged.set(key, { name: cleanText(item.name), quantity: toNumberOrOne(item.quantity) });
+    // Sempre sobrescreve: a última menção é a fonte de verdade
+    merged.set(key, { name: cleanText(item.name), quantity: toNumberOrOne(item.quantity) });
   }
   return Array.from(merged.values());
 }
@@ -864,7 +892,7 @@ async function extractorAgent({ runtime, groupedText }) {
     mode: /retirada|retirar|balcao/.test(lower) ? 'TAKEOUT' : (/entreg|delivery/.test(lower) ? 'DELIVERY' : null),
     payment: /(pix|piz|piks|piquis)\b/.test(lower) ? 'PIX'
       : (/(cartao|cartão|cr[eé]dito|d[eé]bito)/.test(lower) ? 'CARD'
-      : (/dinheiro|especie|espécie|cash|nota/.test(lower) ? 'CASH' : null)),
+        : (/dinheiro|especie|espécie|cash|nota/.test(lower) ? 'CASH' : null)),
     customer_name: null,
     notes: null,
     items: [],
@@ -926,8 +954,10 @@ function mergeRestaurantTransaction(conv, extracted) {
       });
       if (existing) {
         const before = Number(existing.quantity || 0);
-        if (item.absolute) existing.quantity = toNumberOrOne(item.quantity);
-        else existing.quantity += toNumberOrOne(item.quantity);
+        // Por padrão: SET (fonte de verdade é a mensagem atual)
+        // Somente SOMA se o item tiver flag incremental ("mais 1", "adiciona", "faltou")
+        if (item.incremental) existing.quantity += toNumberOrOne(item.quantity);
+        else existing.quantity = toNumberOrOne(item.quantity);
         if (Number(existing.quantity || 0) !== before) changed = true;
         // Preenche código e preço se ainda estavam vazios (item normalizado com catálogo)
         if (!existing.integration_code && item.integration_code) existing.integration_code = String(item.integration_code);
@@ -1102,8 +1132,6 @@ function applySnapshotToConversation(conversation, snapshot) {
 function orchestrate({ runtime, conversation, customer, classification, extracted, groupedText }) {
   if (runtime.segment === 'restaurant') {
     // Só limpa items do merge quando o extractor NÃO encontrou nenhum item na mensagem.
-    // Evita que "Qual o horário?" vire item, mas preserva "Hambúrguer" mesmo que o
-    // classifier chame de CONSULTA por incerteza.
     const extractedHasItems = Array.isArray(extracted?.items) && extracted.items.length > 0;
     const mergeExtracted = (classification.intent === INTENTS.CONSULTA && !extractedHasItems)
       ? { ...extracted, items: [] }
@@ -1113,6 +1141,12 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
   if (runtime.segment === 'restaurant') enrichAddressWithCompanyDefaults(conversation);
   if (runtime.segment === 'restaurant') conversation.pendingFieldConfirmation = null;
 
+  // Recalcular total do carrinho após cada merge
+  if (runtime.segment === 'restaurant' && Array.isArray(conversation.transaction?.items)) {
+    const amounts = calculateOrderAmounts(conversation.transaction, conversation);
+    conversation.transaction.total_amount = amounts.total;
+  }
+
   const handoff = classification.handoff
     || classification.intent === INTENTS.HUMANO
     || Number(classification.confidence || 0) < 0.45
@@ -1121,19 +1155,25 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
 
   if (handoff) return { nextState: STATES.HUMAN_HANDOFF, action: 'HUMAN_HANDOFF', missing: [] };
 
-  const s = conversation.state;
+  // Normalizar estado legado para novo mapa
+  let s = conversation.state;
+  if (s === 'COLLECTING_DATA') s = STATES.ADICIONANDO_ITEM;
+  if (s === 'WAITING_CONFIRMATION') s = STATES.FINALIZANDO;
+  conversation.state = s;
+
   const i = classification.intent;
   const yes = detectYes(groupedText);
   const no = detectNo(groupedText);
   const hasQuestion = /\?/.test(groupedText) || /\b(qual|quando|como|onde|que horas|card[aá]pio|pre[cç]o)\b/i.test(groupedText);
 
   if (runtime.segment === 'clinic') {
-    if (s === STATES.INIT && i === INTENTS.NOVO_PEDIDO) return { nextState: STATES.COLLECTING_DATA, action: 'CLINIC_COLLECT', missing: ['service', 'date', 'time'] };
-    if (s === STATES.WAITING_CONFIRMATION && yes) return { nextState: STATES.CONFIRMED, action: 'CLINIC_CONFIRMED', missing: [] };
-    if (s === STATES.WAITING_CONFIRMATION && no) return { nextState: STATES.COLLECTING_DATA, action: 'REQUEST_ADJUSTMENTS', missing: [] };
+    if (s === STATES.INIT && i === INTENTS.NOVO_PEDIDO) return { nextState: STATES.ADICIONANDO_ITEM, action: 'CLINIC_COLLECT', missing: ['service', 'date', 'time'] };
+    if (s === STATES.FINALIZANDO && yes) return { nextState: STATES.CONFIRMED, action: 'CLINIC_CONFIRMED', missing: [] };
+    if (s === STATES.FINALIZANDO && no) return { nextState: STATES.ADICIONANDO_ITEM, action: 'REQUEST_ADJUSTMENTS', missing: [] };
     return { nextState: s, action: s === STATES.INIT ? 'WELCOME' : 'ASK_MISSING_FIELDS', missing: ['service', 'date', 'time'] };
   }
 
+  // ── INIT ──────────────────────────────────────────────────────────────
   if (s === STATES.INIT) {
     const today = nowISO().slice(0, 10);
     const hasPreviousOrder = Boolean(customer?.lastOrderSnapshot && Array.isArray(customer.lastOrderSnapshot.items) && customer.lastOrderSnapshot.items.length);
@@ -1142,7 +1182,7 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
       if (yes) {
         applySnapshotToConversation(conversation, customer.lastOrderSnapshot);
         conversation.awaitingRepeatChoice = false;
-        return { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
+        return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
       }
       if (no) {
         conversation.awaitingRepeatChoice = false;
@@ -1167,7 +1207,7 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
       if (runtime.greetingOncePerDay && conversation.lastGreetingDate === today) {
         if (conversation.pendingFieldConfirmation) {
           return {
-            nextState: STATES.COLLECTING_DATA,
+            nextState: STATES.ADICIONANDO_ITEM,
             action: hasQuestion ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION',
             missing: [conversation.pendingFieldConfirmation],
           };
@@ -1175,24 +1215,24 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
         const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
           itemsPhaseComplete: conversation.itemsPhaseComplete,
         });
-        return { nextState: STATES.COLLECTING_DATA, action: 'ASK_MISSING_FIELDS', missing };
+        return { nextState: STATES.ADICIONANDO_ITEM, action: 'ASK_MISSING_FIELDS', missing };
       }
       conversation.lastGreetingDate = today;
       const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
         itemsPhaseComplete: conversation.itemsPhaseComplete,
       });
-      return { nextState: STATES.COLLECTING_DATA, action: 'WELCOME', missing };
+      return { nextState: STATES.ADICIONANDO_ITEM, action: 'WELCOME', missing };
     }
     if (i === INTENTS.NOVO_PEDIDO) {
       const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
         itemsPhaseComplete: conversation.itemsPhaseComplete,
       });
-      return missing.length ? { nextState: STATES.COLLECTING_DATA, action: 'ASK_MISSING_FIELDS', missing } : { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
+      return missing.length ? { nextState: STATES.ADICIONANDO_ITEM, action: 'ASK_MISSING_FIELDS', missing } : { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
     }
     if (i === INTENTS.SPAM) return { nextState: STATES.CLOSED, action: 'END_CONVERSATION', missing: [] };
     if (conversation.pendingFieldConfirmation) {
       return {
-        nextState: STATES.COLLECTING_DATA,
+        nextState: STATES.ADICIONANDO_ITEM,
         action: hasQuestion ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION',
         missing: [conversation.pendingFieldConfirmation],
       };
@@ -1200,10 +1240,11 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
     const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
       itemsPhaseComplete: conversation.itemsPhaseComplete,
     });
-    return { nextState: STATES.COLLECTING_DATA, action: hasQuestion ? 'ANSWER_AND_RESUME' : 'ASK_MISSING_FIELDS', missing };
+    return { nextState: STATES.ADICIONANDO_ITEM, action: hasQuestion ? 'ANSWER_AND_RESUME' : 'ASK_MISSING_FIELDS', missing };
   }
 
-  if (s === STATES.COLLECTING_DATA) {
+  // ── ADICIONANDO_ITEM (ex-COLLECTING_DATA) ─────────────────────────────
+  if (s === STATES.ADICIONANDO_ITEM || s === STATES.MENU || s === STATES.CONFIRMANDO_CARRINHO || s === STATES.COLETANDO_ENDERECO || s === STATES.COLETANDO_PAGAMENTO) {
     const explicitCancel = /\b(cancela|cancelar|deixa quieto|desisti|desisto|aborta|encerrar pedido)\b/i.test(groupedText);
     if (explicitCancel) {
       conversation.transaction = { mode: '', customer_name: '', items: [], notes: '', address: { street_name: '', street_number: '', neighborhood: '', city: '', state: '', postal_code: '' }, payment: '', total_amount: 0, order_id: null };
@@ -1236,9 +1277,9 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
         clearTransactionField(conversation.transaction, field);
         conversation.confirmed[field] = false;
         conversation.pendingFieldConfirmation = null;
-        return { nextState: STATES.COLLECTING_DATA, action: 'ASK_MISSING_FIELDS', missing: [field] };
+        return { nextState: STATES.ADICIONANDO_ITEM, action: 'ASK_MISSING_FIELDS', missing: [field] };
       } else {
-        return { nextState: STATES.COLLECTING_DATA, action: hasQuestion ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION', missing: [field] };
+        return { nextState: STATES.ADICIONANDO_ITEM, action: hasQuestion ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION', missing: [field] };
       }
     }
 
@@ -1263,7 +1304,7 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
       !yes && !no && !hasQuestion          // not a confirmation response
     ) {
       conversation.upsellDone = true;
-      return { nextState: STATES.COLLECTING_DATA, action: 'UPSELL_SUGGEST', missing };
+      return { nextState: STATES.ADICIONANDO_ITEM, action: 'UPSELL_SUGGEST', missing };
     }
 
     if (missing.length && !conversation.pendingFieldConfirmation) {
@@ -1279,48 +1320,66 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
       conversation.pendingFieldConfirmation = null;
     }
     if (conversation.pendingFieldConfirmation) {
+      // Determinar sub-estado correto baseado no campo pendente
+      let subState = STATES.ADICIONANDO_ITEM;
+      if (conversation.pendingFieldConfirmation.startsWith('address.')) subState = STATES.COLETANDO_ENDERECO;
+      else if (conversation.pendingFieldConfirmation === 'payment') subState = STATES.COLETANDO_PAGAMENTO;
+      else if (conversation.pendingFieldConfirmation === 'mode') subState = STATES.CONFIRMANDO_CARRINHO;
       return {
-        nextState: STATES.COLLECTING_DATA,
+        nextState: subState,
         action: (i === INTENTS.CONSULTA || hasQuestion) ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION',
         missing: [conversation.pendingFieldConfirmation],
       };
     }
-    return missing.length
-      ? { nextState: STATES.COLLECTING_DATA, action: (i === INTENTS.CONSULTA || hasQuestion) ? 'ANSWER_AND_RESUME' : 'ASK_MISSING_FIELDS', missing }
-      : { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
+
+    // Determinar sub-estado correto baseado no próximo campo faltante
+    if (missing.length) {
+      let subState = STATES.ADICIONANDO_ITEM;
+      const firstMissing = missing[0];
+      if (firstMissing === 'items') subState = STATES.ADICIONANDO_ITEM;
+      else if (firstMissing === 'mode') subState = STATES.CONFIRMANDO_CARRINHO;
+      else if (firstMissing.startsWith('address.')) subState = STATES.COLETANDO_ENDERECO;
+      else if (firstMissing === 'payment') subState = STATES.COLETANDO_PAGAMENTO;
+      return { nextState: subState, action: (i === INTENTS.CONSULTA || hasQuestion) ? 'ANSWER_AND_RESUME' : 'ASK_MISSING_FIELDS', missing };
+    }
+    return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
   }
 
-  if (s === STATES.WAITING_CONFIRMATION) {
-    if (no || i === INTENTS.CANCELAMENTO) return { nextState: STATES.COLLECTING_DATA, action: 'REQUEST_ADJUSTMENTS', missing: [] };
+  // ── FINALIZANDO (ex-WAITING_CONFIRMATION) ──────────────────────────────
+  if (s === STATES.FINALIZANDO) {
+    if (no || i === INTENTS.CANCELAMENTO) return { nextState: STATES.ADICIONANDO_ITEM, action: 'REQUEST_ADJUSTMENTS', missing: [] };
     if (yes) return conversation.transaction.payment === 'PIX'
       ? { nextState: STATES.WAITING_PAYMENT, action: 'CREATE_ORDER_AND_WAIT_PAYMENT', missing: [] }
       : { nextState: STATES.CONFIRMED, action: 'CREATE_ORDER_AND_CONFIRM', missing: [] };
-    if (/\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar)\b/i.test(groupedText)) {
-      return { nextState: STATES.COLLECTING_DATA, action: 'REQUEST_ADJUSTMENTS', missing: [] };
+    // Detecção de correção: reconstruir e reexibir resumo
+    if (/\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar|ta errado|tá errado|está errado|errado|errei)\b/i.test(groupedText)) {
+      return { nextState: STATES.ADICIONANDO_ITEM, action: 'CORRECTION_REBUILD', missing: [] };
     }
     // Consultation question while waiting confirmation: answer then re-ask
-    if (i === INTENTS.CONSULTA || hasQuestion) return { nextState: STATES.WAITING_CONFIRMATION, action: 'ANSWER_AND_CONFIRM', missing: [] };
+    if (i === INTENTS.CONSULTA || hasQuestion) return { nextState: STATES.FINALIZANDO, action: 'ANSWER_AND_CONFIRM', missing: [] };
     const hasOrderChange = Boolean(
       (Array.isArray(extracted?.items) && extracted.items.length > 0)
       || (cleanText(extracted?.mode) && cleanText(extracted.mode) !== cleanText(conversation.transaction?.mode))
       || (cleanText(extracted?.payment) && cleanText(extracted.payment) !== cleanText(conversation.transaction?.payment))
       || (cleanText(extracted?.notes) && cleanText(extracted.notes) !== cleanText(conversation.transaction?.notes))
     );
-    if (hasOrderChange) return { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
-    return { nextState: STATES.WAITING_CONFIRMATION, action: 'ASK_CONFIRMATION', missing: [] };
+    if (hasOrderChange) return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
+    return { nextState: STATES.FINALIZANDO, action: 'ASK_CONFIRMATION', missing: [] };
   }
 
+  // ── WAITING_PAYMENT ───────────────────────────────────────────────────
   if (s === STATES.WAITING_PAYMENT) {
     if (i === INTENTS.PAGAMENTO || yes || /paguei|comprovante|pago/.test(groupedText.toLowerCase())) return { nextState: STATES.CONFIRMED, action: 'PAYMENT_CONFIRMED', missing: [] };
-    if (i === INTENTS.CANCELAMENTO) return { nextState: STATES.COLLECTING_DATA, action: 'REQUEST_ADJUSTMENTS', missing: [] };
+    if (i === INTENTS.CANCELAMENTO) return { nextState: STATES.ADICIONANDO_ITEM, action: 'REQUEST_ADJUSTMENTS', missing: [] };
     if (/retirad|no local|na hora|dinheiro|cart[aã]o|cartao|cr[eé]dito|d[eé]bito/.test(groupedText.toLowerCase())) {
       if (/dinheiro|na hora/.test(groupedText.toLowerCase())) conversation.transaction.payment = 'CASH';
       else if (/cart[aã]o|cartao|cr[eé]dito|d[eé]bito/.test(groupedText.toLowerCase())) conversation.transaction.payment = 'CARD';
-      return { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
+      return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
     }
     return { nextState: STATES.WAITING_PAYMENT, action: 'PAYMENT_REMINDER', missing: [] };
   }
 
+  // ── CONFIRMED ─────────────────────────────────────────────────────────
   if (s === STATES.CONFIRMED) {
     if (i === INTENTS.NOVO_PEDIDO) return { nextState: STATES.CONFIRMED, action: 'BLOCK_NEW_ORDER_UNTIL_FINISH', missing: [] };
     return { nextState: STATES.CONFIRMED, action: 'POST_CONFIRMATION_SUPPORT', missing: [] };
@@ -1342,7 +1401,7 @@ function scheduleFollowUp(conv, evolutionConfig) {
   const key = conv.id;
   clearFollowUpTimers(key);
 
-  const activeStates = [STATES.COLLECTING_DATA, STATES.WAITING_CONFIRMATION, STATES.WAITING_PAYMENT];
+  const activeStates = [STATES.ADICIONANDO_ITEM, STATES.MENU, STATES.CONFIRMANDO_CARRINHO, STATES.COLETANDO_ENDERECO, STATES.COLETANDO_PAGAMENTO, STATES.FINALIZANDO, STATES.WAITING_PAYMENT];
   if (!activeStates.includes(conv.state)) return;
 
   const phone = conv.phone;
@@ -1353,6 +1412,7 @@ function scheduleFollowUp(conv, evolutionConfig) {
     try {
       const current = conversations.get(key);
       if (!current || !activeStates.includes(current.state)) return;
+      // Follow-up de cancelamento: só cancela em estados de carrinho aberto (não em WAITING_PAYMENT/FINALIZANDO)
       const name = cleanText(current.transaction?.customer_name || '').split(' ')[0] || '';
       const msg = name
         ? `${name}, ainda está por aí? Posso continuar com seu pedido 😊`
@@ -1361,13 +1421,16 @@ function scheduleFollowUp(conv, evolutionConfig) {
       appendMessage(current, 'assistant', msg, { action: 'FOLLOWUP_WARNING' });
       appendCustomerMemory(getCustomer(current.tenantId || 'default', current.phone), 'assistant', msg, { action: 'FOLLOWUP_WARNING' }, current.state);
       persistStateDebounced();
-    } catch (_) {}
+    } catch (_) { }
   }, 5 * 60 * 1000);
 
   const cancelTimer = setTimeout(async () => {
     try {
       const current = conversations.get(key);
       if (!current || !activeStates.includes(current.state)) return;
+      // Só cancela automaticamente em estados de carrinho aberto, não em pagamento/finalização
+      const cancelableStates = [STATES.ADICIONANDO_ITEM, STATES.MENU, STATES.CONFIRMANDO_CARRINHO, STATES.COLETANDO_ENDERECO, STATES.COLETANDO_PAGAMENTO];
+      if (!cancelableStates.includes(current.state)) return;
       const name = cleanText(current.transaction?.customer_name || '').split(' ')[0] || '';
       const msg = name
         ? `${name}, como não tivemos resposta, cancelei o pedido em andamento. Quando quiser voltar é só me chamar 😊`
@@ -1387,7 +1450,7 @@ function scheduleFollowUp(conv, evolutionConfig) {
       current.itemsPhaseComplete = false;
       followUpTimers.delete(key);
       persistStateDebounced();
-    } catch (_) {}
+    } catch (_) { }
   }, 30 * 60 * 1000);
 
   followUpTimers.set(key, { warningTimer, cancelTimer });
@@ -1557,8 +1620,11 @@ function calculateOrderAmounts(tx, conversation = null) {
 function generateOrderSummary(tx, conversation = null, { withConfirmation = true } = {}) {
   const safeTx = tx || {};
   const items = (safeTx.items || []).map((it) => {
-    const lineTotal = Number(it.unit_price || 0) * Number(it.quantity || 1);
-    return `• ${it.quantity}x ${it.name}${lineTotal > 0 ? ` - ${formatBRL(lineTotal / 100)}` : ''}`;
+    const unitPrice = Number(it.unit_price || 0);
+    const qty = Number(it.quantity || 1);
+    const lineTotal = unitPrice * qty;
+    const unitDisplay = unitPrice > 0 ? ` (${formatBRL(unitPrice / 100)} un.)` : '';
+    return `• ${qty}x ${it.name}${unitDisplay}${lineTotal > 0 ? ` — ${formatBRL(lineTotal / 100)}` : ''}`;
   }).join('\n') || '• Sem itens';
 
   const paymentMap = { PIX: 'PIX', CARD: 'Cartão', CASH: 'Dinheiro' };
@@ -1566,28 +1632,34 @@ function generateOrderSummary(tx, conversation = null, { withConfirmation = true
   const mode = safeTx.mode === 'TAKEOUT' ? 'Retirada' : 'Entrega';
   const addrParts = [
     safeTx.address?.street_name,
-    safeTx.address?.street_number,
+    safeTx.address?.street_number ? `nº ${safeTx.address.street_number}` : '',
     safeTx.address?.neighborhood,
     safeTx.address?.city,
+    safeTx.address?.state,
+    safeTx.address?.postal_code ? `CEP ${safeTx.address.postal_code}` : '',
   ].filter(Boolean);
   const addressBlock = safeTx.mode === 'DELIVERY' && addrParts.length
-    ? `\nEndereço:\n${addrParts.join(', ')}`
+    ? `\n📍 Endereço:\n${addrParts.join(', ')}`
     : '';
 
   const amounts = calculateOrderAmounts(safeTx, conversation);
   const lines = [
-    'Aqui está o resumo do seu pedido:',
+    '📋 *Resumo do pedido:*',
     '',
-    'Itens:',
+    '🛒 *Itens:*',
     items,
     '',
-    `Modalidade: ${mode}${addressBlock}`,
-    `Pagamento: ${payment}`,
+    `🚚 Modalidade: ${mode}${addressBlock}`,
+    `💳 Pagamento: ${payment}`,
+    '',
     `Subtotal: ${formatBRL(amounts.itemTotal / 100)}`,
   ];
-  if (amounts.feeCents > 0) lines.push(`Taxa de entrega: ${formatBRL(amounts.feeCents / 100)}`);
-  lines.push(`Total: ${formatBRL(amounts.total / 100)}`);
-  if (withConfirmation) lines.push('', 'Está tudo certo para confirmar?');
+  // Sempre mostrar taxa de entrega quando modo é DELIVERY
+  if (safeTx.mode === 'DELIVERY') {
+    lines.push(`Taxa de entrega: ${amounts.feeCents > 0 ? formatBRL(amounts.feeCents / 100) : 'a confirmar'}`);
+  }
+  lines.push(`*Total: ${formatBRL(amounts.total / 100)}*`);
+  if (withConfirmation) lines.push('', 'Está tudo certo para confirmar? 😊');
   return lines.join('\n');
 }
 
@@ -1775,7 +1847,26 @@ function toReaisAmount(v) {
 function isBeverageItemName(name = '') {
   const n = normalizeForMatch(name);
   if (!n) return false;
-  return /\b(coca|cola|refrigerante|refri|suco|agua|agua de coco|cha|cafe|cafezinho|cerveja|guarana|fanta|sprite|pepsi)\b/.test(n);
+  return /\b(coca|cola|refrigerante|refri|suco|agua|agua de coco|cha|cafe|cafezinho|cerveja|guarana|fanta|sprite|pepsi|mate|limonada|laranjada|energetico|monster|red bull)\b/.test(n);
+}
+
+function isDessertItemName(name = '') {
+  const n = normalizeForMatch(name);
+  if (!n) return false;
+  return /\b(sobremesa|doce|bolo|sorvete|mousse|pudim|torta|brigadeiro|brownie|acai|petit gateau|cheesecake|pavê|pave|gelatina|sundae)\b/.test(n);
+}
+
+function isSideItemName(name = '') {
+  const n = normalizeForMatch(name);
+  if (!n) return false;
+  return /\b(acompanhamento|batata|salada|arroz|farofa|vinagrete|porcao|porção|onion rings|mandioca|macaxeira|pure|purê|coleslaw|molho extra)\b/.test(n);
+}
+
+function categorizeItem(name = '') {
+  if (isBeverageItemName(name)) return 'BEBIDA';
+  if (isDessertItemName(name)) return 'SOBREMESA';
+  if (isSideItemName(name)) return 'ACOMPANHAMENTO';
+  return 'PRATO';
 }
 
 function resolveDeliveryFee(conversation, tx) {
@@ -1902,16 +1993,34 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
     const itemLines = (tx.items || []).map((it) => `• ${it.quantity}x ${it.name}`).join('\n') || '—';
     const mcp = conversation?.companyData || {};
     const menu = Array.isArray(mcp.menu) ? mcp.menu : [];
-    const cartHasBeverage = (tx.items || []).some((it) => isBeverageItemName(it.name));
+    // Categorias já presentes no carrinho
+    const cartCategories = new Set((tx.items || []).map((it) => categorizeItem(it.name)));
     const cartNorms = (tx.items || []).map((it) => normalizeForMatch(it.name));
+
+    // Prioridade de sugestão: BEBIDA → SOBREMESA → ACOMPANHAMENTO
+    let suggestionCategory = '';
+    let suggestionLabel = '';
+    if (!cartCategories.has('BEBIDA')) { suggestionCategory = 'BEBIDA'; suggestionLabel = 'uma bebida'; }
+    else if (!cartCategories.has('SOBREMESA')) { suggestionCategory = 'SOBREMESA'; suggestionLabel = 'uma sobremesa'; }
+    else if (!cartCategories.has('ACOMPANHAMENTO')) { suggestionCategory = 'ACOMPANHAMENTO'; suggestionLabel = 'um acompanhamento'; }
+
     const extras = menu
       .filter((m) => m.available !== false && !cartNorms.includes(normalizeForMatch(m.name)))
-      .filter((m) => !(cartHasBeverage && isBeverageItemName(m.name)))
+      .filter((m) => {
+        if (!suggestionCategory) return true;
+        return categorizeItem(m.name) === suggestionCategory;
+      })
       .slice(0, 3)
       .map((m) => m.name);
-    const suggestionLine = extras.length
-      ? `Quer acrescentar mais alguma coisa? Temos também ${extras.join(', ')} 😋`
-      : 'Quer acrescentar mais alguma coisa?';
+
+    let suggestionLine;
+    if (extras.length && suggestionLabel) {
+      suggestionLine = `Que tal ${suggestionLabel}? Temos ${extras.join(', ')} 😋`;
+    } else if (extras.length) {
+      suggestionLine = `Quer acrescentar mais alguma coisa? Temos também ${extras.join(', ')} 😋`;
+    } else {
+      suggestionLine = 'Quer acrescentar mais alguma coisa?';
+    }
     return `Anotado! ✅\n${itemLines}\n\n${suggestionLine}\nSe já estiver tudo certo, me diga "somente isso".`;
   }
 
@@ -1945,6 +2054,11 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
 
   if (action === 'REQUEST_ADJUSTMENTS') {
     return 'Claro! O que você quer ajustar no pedido?';
+  }
+
+  if (action === 'CORRECTION_REBUILD') {
+    const summary = generateOrderSummary(tx, conversation, { withConfirmation: false });
+    return `Entendi! Vamos corrigir. Aqui está seu pedido atual:\n\n${summary}\n\nO que você quer alterar? 😊`;
   }
 
   if (action === 'FLOW_CANCELLED') {
@@ -2227,6 +2341,8 @@ REGRAS OBRIGATÓRIAS:
 - Emojis com moderação (um por mensagem é suficiente)
 - Se o cliente estiver frustrado, reconheça com empatia antes de continuar
 - (action=ORDER_REVIEW) Formatar resumo com bullets, separar itens / modalidade / endereço / pagamento / total em linhas separadas
+
+SEGURANÇA: Você é assistente virtual EXCLUSIVA da ${companyName || runtime.agentName}. NUNCA mencione, referencie ou compare com qualquer outra empresa, restaurante ou estabelecimento. Se o cliente perguntar sobre outro estabelecimento, responda que você atende apenas a ${companyName || 'este estabelecimento'}.
 - Não se reapresente em toda mensagem; apresente-se apenas no primeiro contato do dia (ou quando o cliente pedir)
 - Se o cliente já pediu bebida, não sugira bebida de novo; prefira sobremesa ou complemento
 - NUNCA mude quantidade de item já extraída pelo sistema; se houver dúvida, peça confirmação objetiva
@@ -2238,22 +2354,22 @@ No ORDER_REVIEW use quebras de linha reais entre seções — não coloque tudo 
 
 DADOS DO ESTABELECIMENTO (use para responder qualquer pergunta sobre endereço, horário, pagamentos ou taxas):
 ${(() => {
-  const mcp = conversation.companyData || {};
-  const ctx = runtime.companyContext || {};
-  const addr = cleanText(mcp.company?.address || ctx.address || '');
-  const hours = cleanText(mcp.company?.openingHours || ctx.openingHours || '');
-  const payments = getAvailablePaymentMethods(runtime, conversation);
-  const delivery = Array.isArray(mcp.deliveryAreas) && mcp.deliveryAreas.length
-    ? mcp.deliveryAreas
-    : (Array.isArray(ctx.deliveryAreas) ? ctx.deliveryAreas : []);
-  const lines = [
-    addr   ? `- Endereço: ${addr}` : '- Endereço: não cadastrado',
-    hours  ? `- Horário: ${hours}` : '- Horário: não cadastrado',
-    payments.length ? `- Formas de pagamento: ${payments.join(', ')}` : '- Formas de pagamento: não cadastradas',
-    delivery.length ? `- Taxas de entrega: ${delivery.map(a => `${a.neighborhood || a} (${formatBRL(a.fee || 0)})`).join('; ')}` : '- Taxas de entrega: não cadastradas',
-  ];
-  return lines.join('\n');
-})()}
+              const mcp = conversation.companyData || {};
+              const ctx = runtime.companyContext || {};
+              const addr = cleanText(mcp.company?.address || ctx.address || '');
+              const hours = cleanText(mcp.company?.openingHours || ctx.openingHours || '');
+              const payments = getAvailablePaymentMethods(runtime, conversation);
+              const delivery = Array.isArray(mcp.deliveryAreas) && mcp.deliveryAreas.length
+                ? mcp.deliveryAreas
+                : (Array.isArray(ctx.deliveryAreas) ? ctx.deliveryAreas : []);
+              const lines = [
+                addr ? `- Endereço: ${addr}` : '- Endereço: não cadastrado',
+                hours ? `- Horário: ${hours}` : '- Horário: não cadastrado',
+                payments.length ? `- Formas de pagamento: ${payments.join(', ')}` : '- Formas de pagamento: não cadastradas',
+                delivery.length ? `- Taxas de entrega: ${delivery.map(a => `${a.neighborhood || a} (${formatBRL(a.fee || 0)})`).join('; ')}` : '- Taxas de entrega: não cadastradas',
+              ];
+              return lines.join('\n');
+            })()}
 ${runtime.customPrompt ? `\nINSTRUÇÕES ESPECÍFICAS DO ESTABELECIMENTO:\n${runtime.customPrompt}` : ''}`,
         },
         {
@@ -2295,7 +2411,7 @@ async function maybeSummarize({ runtime, conversation, customer = null }) {
     });
     conversation.contextSummary = cleanText(c.choices?.[0]?.message?.content || conversation.contextSummary || '');
     if (customer) customer.recentContextSummary = cleanText(conversation.contextSummary || customer.recentContextSummary || '');
-  } catch (_) {}
+  } catch (_) { }
 }
 
 async function sendWhatsAppMessage(phone, text, runtime, remoteJid = null) {
@@ -2349,7 +2465,7 @@ async function sendWhatsAppMessage(phone, text, runtime, remoteJid = null) {
           name: String(row?.instance?.instanceName || row?.instanceName || row?.name || row?.instance || ''),
           state: String(row?.instance?.state || row?.state || row?.status || '').toLowerCase(),
         })).filter((r) => r.name);
-      } catch (_) {}
+      } catch (_) { }
     }
     return [];
   }
@@ -2373,7 +2489,7 @@ async function sendWhatsAppMessage(phone, text, runtime, remoteJid = null) {
     const instances = await fetchInstances();
     const chosen = bestInstance(instances, runtime.evolution.instance);
     if (chosen && !candidates.includes(chosen)) candidates.unshift(chosen);
-  } catch (_) {}
+  } catch (_) { }
 
   const payloads = [
     { number: null, text: safeText, delay: 600 },
@@ -2424,7 +2540,7 @@ async function sendWhatsAppMessage(phone, text, runtime, remoteJid = null) {
       }
     }
   }
-  console.error(`[ANA] Nao foi possivel enviar WhatsApp para ${phone} (instance=${runtime.evolution.instance || '-' }):`, lastErr?.details || lastErr?.message || 'unknown error');
+  console.error(`[ANA] Nao foi possivel enviar WhatsApp para ${phone} (instance=${runtime.evolution.instance || '-'}):`, lastErr?.details || lastErr?.message || 'unknown error');
   return false;
 }
 
@@ -2449,7 +2565,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       apiRequest,
       getEnvConfig,
     });
-  } catch (_) {}
+  } catch (_) { }
 
   await maybeLoadCatalog(conversation, runtime, apiRequest, getEnvConfig, log);
 
@@ -2477,8 +2593,11 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     );
   const shouldExtract = classification.requires_extraction
     || (runtime.segment === 'restaurant' && [
-      STATES.COLLECTING_DATA,
-      STATES.WAITING_CONFIRMATION,
+      STATES.ADICIONANDO_ITEM,
+      STATES.CONFIRMANDO_CARRINHO,
+      STATES.COLETANDO_ENDERECO,
+      STATES.COLETANDO_PAGAMENTO,
+      STATES.FINALIZANDO,
       STATES.WAITING_PAYMENT,
     ].includes(conversation.state))
     || (runtime.segment === 'restaurant' && hasOpenTransaction && missingBeforeExtraction.length > 0)
@@ -2508,9 +2627,10 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     forceFillPendingField({ conversation, runtime, groupedText: normalizedText, extracted });
     extracted.items = normalizeExtractedItemsWithCatalog(extracted.items || [], conversation.catalog || []);
     const textLower = String(normalizedText || '').toLowerCase();
-    const hasAbsoluteHint = /\b(no total|total de|corrig|ajust|alter|troca|est[aá]\s*errad|quero\s+\d+)/i.test(textLower);
-    if (hasAbsoluteHint && Array.isArray(extracted.items) && extracted.items.length) {
-      extracted.items = extracted.items.map((it) => ({ ...it, absolute: true }));
+    // INVERTIDO: por padrão tudo é SET (absoluto). "mais"/"adiciona"/"faltou" marca como incremental.
+    const hasIncrementalHint = /\b(mais|adiciona|acrescenta|inclui|faltou|também|tambem|acrescentar)\b/i.test(textLower);
+    if (hasIncrementalHint && Array.isArray(extracted.items) && extracted.items.length) {
+      extracted.items = extracted.items.map((it) => ({ ...it, incremental: true }));
     }
     // Remove unresolved duplicates: if an item with integration_code exists, drop similar items without code
     {
@@ -2555,7 +2675,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     const preValidation = resolveItemsWithCatalog(conversation.transaction.items, conversation.catalog || []);
     if (preValidation.unresolved.length) {
       conversation.consecutiveFailures = (conversation.consecutiveFailures || 0) + 1;
-      conversation.state = STATES.COLLECTING_DATA;
+      conversation.state = STATES.ADICIONANDO_ITEM;
       conversation.stateUpdatedAt = nowISO();
       const failText = `Não encontrei esses itens no cardápio: ${preValidation.unresolved.join(', ')}. Pode informar exatamente como aparece no cardápio?`;
       const sent = await sendWhatsAppMessage(conversation.phone, failText, runtime, conversation.remoteJid);
@@ -2585,12 +2705,12 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     if (!order.ok) {
       conversation.consecutiveFailures = (conversation.consecutiveFailures || 0) + 1;
       // Evita estado fantasma em WAITING_PAYMENT quando falha ao criar pedido
-      conversation.state = STATES.WAITING_CONFIRMATION;
+      conversation.state = STATES.FINALIZANDO;
       conversation.stateUpdatedAt = nowISO();
       let failText = 'Tive um problema ao registrar o pedido no sistema.';
       if (Array.isArray(order.unresolved) && order.unresolved.length) {
         failText = `Não encontrei esses itens no cardápio: ${order.unresolved.join(', ')}. Pode informar exatamente como aparece no cardápio?`;
-        conversation.state = STATES.COLLECTING_DATA;
+        conversation.state = STATES.ADICIONANDO_ITEM;
         conversation.stateUpdatedAt = nowISO();
       } else if (runtime.orderProvider === 'anafood') {
         failText = 'Estou com instabilidade para concluir o pedido agora. Pode tentar novamente em instantes?';
@@ -2788,14 +2908,14 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
       await runPipeline({ conversation, customer, groupedText, normalized, runtime, apiRequest, getEnvConfig, log, onSend });
       // Fire-and-forget: persist mensagem do usuário no Supabase msg_history
       saveInboundMessage({
-        supabaseUrl:    String(runtime.supabase?.url || '').trim(),
+        supabaseUrl: String(runtime.supabase?.url || '').trim(),
         serviceRoleKey: String(runtime.supabase?.serviceRoleKey || '').trim(),
-        companyId:      String(conversation.companyData?.meta?.companyId || runtime.supabase?.filterValue || '').trim(),
-        tenantId:       runtime.id,
-        phone:          conversation.phone,
-        content:        normalized.normalizedText || groupedText,
-        at:             new Date().toISOString(),
-        contactName:    String(conversation.contactName || customer.name || '').trim(),
+        companyId: String(conversation.companyData?.meta?.companyId || runtime.supabase?.filterValue || '').trim(),
+        tenantId: runtime.id,
+        phone: conversation.phone,
+        content: normalized.normalizedText || groupedText,
+        at: new Date().toISOString(),
+        contactName: String(conversation.contactName || customer.name || '').trim(),
       });
     } catch (err) {
       conversation.consecutiveFailures = (conversation.consecutiveFailures || 0) + 1;
