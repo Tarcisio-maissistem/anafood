@@ -72,6 +72,11 @@ const detectNo = (t) => {
   if (x.includes('nao quero') || x.includes('não quero') || x.includes('deixa pra la') || x.includes('deixa pra lá') || x.includes('esquece') || x.includes('pode cancelar') || x.includes('cancela') || x.includes('nao obrigado') || x.includes('não obrigado') || x.includes('nao precisa') || x.includes('não precisa') || x.includes('pode parar') || x.includes('nao quero mais') || x.includes('não quero mais')) return true;
   return false;
 };
+const detectItemsPhaseDone = (t) => {
+  const x = normalizeForMatch(t);
+  if (!x) return false;
+  return /\b(so isso|somente isso|apenas isso|e isso|isso mesmo|pode fechar|fechar pedido|fechar|nada mais|nao quero mais|nao quero adicionar mais|nao quero acrescentar mais|pedido completo)\b/.test(x);
+};
 const formatBRL = (n) => {
   const v = Number(n || 0);
   if (!Number.isFinite(v)) return 'R$ 0,00';
@@ -97,6 +102,49 @@ const singularizeToken = (token) => {
   return t;
 };
 const canonicalTokens = (v) => tokenizeNormalized(v).map(singularizeToken).filter(Boolean);
+
+function normalizePaymentLabel(value) {
+  const x = normalizeForMatch(value);
+  if (!x) return '';
+  if (/\bpix\b/.test(x)) return 'PIX';
+  if (/\b(dinheiro|especie|cash)\b/.test(x)) return 'Dinheiro';
+  if (/\b(cartao|credito|debito)\b/.test(x)) return 'Cartão';
+  if (/\b(vale refeicao|vr)\b/.test(x)) return 'Vale refeição';
+  if (/\b(vale alimentacao|va)\b/.test(x)) return 'Vale alimentação';
+  if (/\b(boleto)\b/.test(x)) return 'Boleto';
+  if (/\b(transferencia|transferencia bancaria|ted|doc)\b/.test(x)) return 'Transferência';
+  return cleanText(value);
+}
+
+function extractPaymentMethodsFromText(info) {
+  const x = normalizeForMatch(info);
+  if (!x) return [];
+  const found = [];
+  if (/\bpix\b/.test(x)) found.push('PIX');
+  if (/\b(cartao|credito|debito)\b/.test(x)) found.push('Cartão');
+  if (/\b(dinheiro|especie|cash)\b/.test(x)) found.push('Dinheiro');
+  if (/\b(vale refeicao|vr)\b/.test(x)) found.push('Vale refeição');
+  if (/\b(vale alimentacao|va)\b/.test(x)) found.push('Vale alimentação');
+  if (/\b(boleto)\b/.test(x)) found.push('Boleto');
+  if (/\b(transferencia|ted|doc)\b/.test(x)) found.push('Transferência');
+  return found;
+}
+
+function getAvailablePaymentMethods(runtime, conversation) {
+  const mcp = conversation?.companyData || {};
+  const company = mcp?.company || {};
+  const ctx = runtime?.companyContext || {};
+  const raw = [
+    ...(Array.isArray(mcp.paymentMethods) ? mcp.paymentMethods : []),
+    ...(Array.isArray(ctx.paymentMethods) ? ctx.paymentMethods : []),
+    ...extractPaymentMethodsFromText(mcp.paymentInfo || ''),
+    ...extractPaymentMethodsFromText(company.paymentInfo || company.payment_info || ''),
+    ...extractPaymentMethodsFromText(ctx.paymentInfo || ''),
+  ];
+  const labels = raw.map(normalizePaymentLabel).filter(Boolean);
+  const unique = Array.from(new Set(labels));
+  return unique.length ? unique : ['PIX', 'Cartão', 'Dinheiro'];
+}
 
 function getCompanyDisplayName(runtime, conversation = null) {
   const company = conversation?.companyData?.company || {};
@@ -363,6 +411,7 @@ function getConversation(phone, tenantId = 'default') {
     },
     confirmed: {},
     pendingFieldConfirmation: null,
+    itemsPhaseComplete: false,
     awaitingRepeatChoice: false,
     lastRepeatOfferDate: '',
     repeatPreview: '',
@@ -387,10 +436,22 @@ function getConversation(phone, tenantId = 'default') {
   if (!conv.confirmed || typeof conv.confirmed !== 'object') conv.confirmed = {};
   if (!conv.stateUpdatedAt) conv.stateUpdatedAt = nowISO();
   if (typeof conv.pendingFieldConfirmation === 'undefined') conv.pendingFieldConfirmation = null;
+  if (typeof conv.itemsPhaseComplete !== 'boolean') conv.itemsPhaseComplete = false;
   if (typeof conv.awaitingRepeatChoice !== 'boolean') conv.awaitingRepeatChoice = false;
   if (typeof conv.lastRepeatOfferDate !== 'string') conv.lastRepeatOfferDate = '';
   if (typeof conv.repeatPreview !== 'string') conv.repeatPreview = '';
   if (typeof conv.orderStoredForCustomer !== 'boolean') conv.orderStoredForCustomer = false;
+  if (
+    !conv.itemsPhaseComplete
+    && Array.isArray(conv.transaction?.items) && conv.transaction.items.length > 0
+    && (
+      Boolean(cleanText(conv.transaction?.mode))
+      || Boolean(cleanText(conv.transaction?.payment))
+      || [STATES.WAITING_CONFIRMATION, STATES.WAITING_PAYMENT, STATES.CONFIRMED].includes(conv.state)
+    )
+  ) {
+    conv.itemsPhaseComplete = true;
+  }
   conv.lastActivityAt = nowISO();
   return conv;
 }
@@ -502,6 +563,7 @@ function extractItemsFromFreeText(text) {
 
   for (let chunk of chunks) {
     if (/^(oi|ola|olá|bom dia|boa tarde|boa noite)$/i.test(chunk)) continue;
+    if (/^(so isso|só isso|somente isso|apenas isso|isso|isso mesmo|e isso|nada mais|pedido completo|fechar pedido|pode fechar)$/i.test(chunk)) continue;
     if (/\b(rua|av(?:enida)?|bairro|cep|numero|n[úu]mero|pix|cart[aã]o|retirada|delivery|dinheiro|especie|espécie|cash)\b/i.test(chunk)) continue;
     if (/\b(horario|horário|funcionamento|endereco|endereço|taxa|taxas|cardapio|cardápio|preço|preco|quanto custa|quanto fica|como funciona|qual é|qual e|quais s[aã]o|informacao|informação)\b/i.test(chunk)) continue;
     if (chunk.trim().endsWith('?')) continue; // perguntas não são itens
@@ -699,7 +761,11 @@ function mergeRestaurantTransaction(conv, extracted) {
         changed = true;
       }
     }
-    if (changed) markFieldChanged(conv, 'items');
+    if (changed) {
+      markFieldChanged(conv, 'items');
+      conv.upsellDone = false;
+      conv.itemsPhaseComplete = false;
+    }
   }
 
   if (extracted.address && typeof extracted.address === 'object') {
@@ -714,10 +780,13 @@ function mergeRestaurantTransaction(conv, extracted) {
   }
 }
 
-function restaurantMissingFields(runtime, tx, confirmed = {}) {
+function restaurantMissingFields(runtime, tx, confirmed = {}, options = {}) {
   const missing = [];
-  if (!Array.isArray(tx.items) || tx.items.length === 0) missing.push('items');
-  if (Array.isArray(tx.items) && tx.items.some((i) => !Number(i.quantity) || Number(i.quantity) <= 0)) missing.push('items');
+  const hasItems = Array.isArray(tx.items) && tx.items.length > 0;
+  const itemsPhaseComplete = options.itemsPhaseComplete !== false;
+  if (!hasItems) missing.push('items');
+  if (hasItems && tx.items.some((i) => !Number(i.quantity) || Number(i.quantity) <= 0)) missing.push('items');
+  if (hasItems && !itemsPhaseComplete) return Array.from(new Set(missing.concat('items')));
   if (!tx.mode) missing.push('mode');
   if (tx.mode === 'DELIVERY' && runtime.delivery.requireAddress) {
     for (const f of ['street_name', 'street_number', 'neighborhood']) {
@@ -760,8 +829,8 @@ function fieldConfirmationLabel(field) {
 function fieldConfirmationValue(tx, field) {
   if (field === 'customer_name') return tx.customer_name || '-';
   if (field === 'notes') return tx.notes || '-';
-  if (field === 'mode') return tx.mode === 'TAKEOUT' ? 'retirada' : 'delivery';
-  if (field === 'payment') return tx.payment === 'PIX' ? 'PIX' : (tx.payment === 'CARD' ? 'cartao' : (tx.payment || '-'));
+  if (field === 'mode') return tx.mode === 'TAKEOUT' ? 'retirada' : 'entrega';
+  if (field === 'payment') return tx.payment === 'PIX' ? 'PIX' : (tx.payment === 'CARD' ? 'cartão' : (tx.payment === 'CASH' ? 'dinheiro' : (tx.payment || '-')));
   if (field === 'items') return (tx.items || []).map((i) => `${i.quantity}x ${i.name}`).join(', ') || '-';
   if (field.startsWith('address.')) {
     const addrKey = field.slice('address.'.length);
@@ -837,6 +906,7 @@ function applySnapshotToConversation(conversation, snapshot) {
   };
   conversation.confirmed = allConfirmed;
   conversation.pendingFieldConfirmation = null;
+  conversation.itemsPhaseComplete = true;
 }
 
 function orchestrate({ runtime, conversation, customer, classification, extracted, groupedText }) {
@@ -912,15 +982,21 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
             missing: [conversation.pendingFieldConfirmation],
           };
         }
-        const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed);
+        const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+          itemsPhaseComplete: conversation.itemsPhaseComplete,
+        });
         return { nextState: STATES.COLLECTING_DATA, action: 'ASK_MISSING_FIELDS', missing };
       }
       conversation.lastGreetingDate = today;
-      const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed);
+      const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+        itemsPhaseComplete: conversation.itemsPhaseComplete,
+      });
       return { nextState: STATES.COLLECTING_DATA, action: 'WELCOME', missing };
     }
     if (i === INTENTS.NOVO_PEDIDO) {
-      const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed);
+      const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+        itemsPhaseComplete: conversation.itemsPhaseComplete,
+      });
       return missing.length ? { nextState: STATES.COLLECTING_DATA, action: 'ASK_MISSING_FIELDS', missing } : { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
     }
     if (i === INTENTS.SPAM) return { nextState: STATES.CLOSED, action: 'END_CONVERSATION', missing: [] };
@@ -931,7 +1007,9 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
         missing: [conversation.pendingFieldConfirmation],
       };
     }
-    const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed);
+    const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+      itemsPhaseComplete: conversation.itemsPhaseComplete,
+    });
     return { nextState: STATES.COLLECTING_DATA, action: hasQuestion ? 'ANSWER_AND_RESUME' : 'ASK_MISSING_FIELDS', missing };
   }
 
@@ -941,6 +1019,7 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
       conversation.confirmed = {};
       conversation.pendingFieldConfirmation = null;
       conversation.upsellDone = false;
+      conversation.itemsPhaseComplete = false;
       return { nextState: STATES.INIT, action: 'FLOW_CANCELLED', missing: [] };
     }
     if (conversation.pendingFieldConfirmation) {
@@ -958,17 +1037,25 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
       }
     }
 
-    const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed);
+    const hasItems = Array.isArray(conversation.transaction.items) && conversation.transaction.items.length > 0;
+    const hasNewItemsInMessage = Array.isArray(extracted?.items) && extracted.items.length > 0;
+    const finishedSelectingItems = detectItemsPhaseDone(groupedText);
+    if (hasNewItemsInMessage) conversation.itemsPhaseComplete = false;
+    if (hasItems && !conversation.itemsPhaseComplete && finishedSelectingItems && !hasNewItemsInMessage) {
+      conversation.itemsPhaseComplete = true;
+      conversation.upsellDone = true;
+    }
+    const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+      itemsPhaseComplete: conversation.itemsPhaseComplete,
+    });
 
     // UPSELL: After items are set, suggest extras before collecting logistics (once per order)
-    const hasItems = Array.isArray(conversation.transaction.items) && conversation.transaction.items.length > 0;
     if (
       hasItems &&
-      missing.length &&
-      !missing.includes('items') &&       // items already filled
+      !conversation.itemsPhaseComplete &&  // still selecting items
       !conversation.upsellDone &&          // haven't upsold yet
       i !== INTENTS.CANCELAMENTO &&
-      !yes && !no                          // not a confirmation response
+      !yes && !no && !hasQuestion          // not a confirmation response
     ) {
       conversation.upsellDone = true;
       return { nextState: STATES.COLLECTING_DATA, action: 'UPSELL_SUGGEST', missing };
@@ -1087,6 +1174,7 @@ function scheduleFollowUp(conv, evolutionConfig) {
       };
       current.confirmed = {};
       current.pendingFieldConfirmation = null;
+      current.itemsPhaseComplete = false;
       followUpTimers.delete(key);
       persistStateDebounced();
     } catch (_) {}
@@ -1205,7 +1293,9 @@ function hasExtractedField(extracted, field) {
 
 function forceFillPendingField({ conversation, runtime, groupedText, extracted }) {
   if (runtime.segment !== 'restaurant') return;
-  const pendingField = conversation.pendingFieldConfirmation || restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed)[0];
+  const pendingField = conversation.pendingFieldConfirmation || restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+    itemsPhaseComplete: conversation.itemsPhaseComplete,
+  })[0];
   if (!pendingField || hasExtractedField(extracted, pendingField)) return;
 
   const text = cleanText(groupedText);
@@ -1213,6 +1303,7 @@ function forceFillPendingField({ conversation, runtime, groupedText, extracted }
   if (!extracted.address || typeof extracted.address !== 'object') extracted.address = {};
 
   if (pendingField === 'items') {
+    if (detectItemsPhaseDone(text)) return;
     const items = extractItemsFromFreeText(text);
     if (items.length) extracted.items = items;
     return;
@@ -1425,13 +1516,13 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
 
   if (action === 'ASK_MISSING_FIELDS') {
     const first = (missing || [])[0];
-    const mcp = conversation?.companyData || {};
-    const payments = Array.isArray(mcp?.paymentMethods) && mcp.paymentMethods.length
-      ? mcp.paymentMethods.join(', ')
-      : 'PIX ou cartão';
+    const payments = getAvailablePaymentMethods(runtime, conversation).join(', ');
+    const hasItems = Array.isArray(tx?.items) && tx.items.length > 0;
     const map = {
       customer_name: 'Qual é o seu nome?',
-      items: 'O que você vai querer hoje? 😊',
+      items: hasItems
+        ? 'Perfeito. Quer acrescentar, remover ou alterar algum item? Se estiver tudo certo, me diga "somente isso".'
+        : 'O que você vai querer hoje? 😊',
       notes: 'Tem alguma observação para o pedido? Se não tiver, é só dizer "sem observações".',
       mode: 'É pra retirada ou entrega?',
       payment: `Como prefere pagar? ${payments}`,
@@ -1449,7 +1540,12 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
     const lastUser = cleanText(conversation?.messages?.slice(-1)?.[0]?.content || '').toLowerCase();
     if (/^ja (falei|informei)|^já (falei|informei)/.test(lastUser)) {
       const first = (missing || [])[0];
-      if (first === 'items') return 'Entendido! Para eu registrar certinho, pode informar os itens assim: "1 prato do dia e 1 coca-cola lata"?';
+      if (first === 'items') {
+        const hasItems = Array.isArray(tx?.items) && tx.items.length > 0;
+        return hasItems
+          ? 'Entendido! Quer acrescentar, remover ou alterar algum item? Se estiver finalizado, me diga "somente isso".'
+          : 'Entendido! Para eu registrar certinho, pode informar os itens assim: "1 prato do dia e 1 coca-cola lata"?';
+      }
       if (first === 'address.street_name') return 'Entendido! Pode me passar a rua completa?';
       if (first === 'address.street_number') return 'Entendido! E o número da casa?';
       if (first === 'address.neighborhood') return 'Entendido! Qual é o bairro?';
@@ -1478,7 +1574,7 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
     const suggestionLine = extras.length
       ? `Quer acrescentar mais alguma coisa? Temos também ${extras.join(', ')} 😋`
       : 'Quer acrescentar mais alguma coisa?';
-    return `Anotado! ✅\n${itemLines}\n\n${suggestionLine}`;
+    return `Anotado! ✅\n${itemLines}\n\n${suggestionLine}\nSe já estiver tudo certo, me diga "somente isso".`;
   }
 
   if (action === 'ANSWER_AND_CONFIRM') {
@@ -1557,7 +1653,6 @@ function buildMenuReply(conversation, followUp = '') {
   const sections = [];
   for (const [cat, items] of categories.entries()) {
     const lines = items
-      .slice(0, 10)
       .map((i) => `- ${i.name}${Number(i.price || 0) > 0 ? ` (${formatBRL(i.price)})` : ''}`)
       .join('\n');
     // Só mostra rótulo de categoria quando é informativo (não vazio)
@@ -1572,7 +1667,7 @@ function buildContextualAnswer(conversation, userMessage = '') {
   const mcp = conversation?.companyData || {};
   const company = mcp?.company || {};
   const menu = Array.isArray(mcp?.menu) ? mcp.menu : [];
-  const payments = Array.isArray(mcp?.paymentMethods) ? mcp.paymentMethods : [];
+  const payments = getAvailablePaymentMethods({}, conversation);
   const deliveryAreas = Array.isArray(mcp?.deliveryAreas) ? mcp.deliveryAreas : [];
 
   // "O que eu pedi?" / "meu pedido" → resumo parcial do pedido atual
@@ -1580,7 +1675,10 @@ function buildContextualAnswer(conversation, userMessage = '') {
     const items = (conversation?.transaction?.items || []).filter((it) => cleanText(it.name));
     if (items.length > 0) {
       const lines = items.map((it) => `• ${it.quantity}x ${it.name}`).join('\n');
-      return `Seu pedido até agora:\n${lines}`;
+      const followUp = conversation?.itemsPhaseComplete
+        ? ''
+        : '\n\nQuer acrescentar, remover ou alterar algum item? Se estiver finalizado, me diga "somente isso".';
+      return `Seu pedido até agora:\n${lines}${followUp}`;
     }
     return 'Ainda não registrei nenhum item no seu pedido.';
   }
@@ -1723,8 +1821,8 @@ PERSONALIDADE: Seja calorosa, empática e proativa. Use o nome do cliente quando
 FLUXO DE VENDA (siga esta ordem):
 1. Receber item → confirmar o que foi pedido
 2. (action=UPSELL_SUGGEST) Sugerir complemento: bebida para prato, sobremesa, upgrade — nunca insistir
-3. Após o cliente indicar que não quer mais nada → perguntar retirada ou delivery
-4. Coletar endereço (só se delivery)
+3. Após o cliente indicar que não quer mais nada → perguntar retirada ou entrega
+4. Coletar endereço (só se entrega)
 5. Perguntar pagamento
 6. Apresentar resumo estruturado com itens em bullets, endereço, pagamento e total
 7. Pedir confirmação — SOMENTE por último
@@ -1750,10 +1848,7 @@ ${(() => {
   const ctx = runtime.companyContext || {};
   const addr = cleanText(mcp.company?.address || ctx.address || '');
   const hours = cleanText(mcp.company?.openingHours || ctx.openingHours || '');
-  const payments = Array.from(new Set([
-    ...(Array.isArray(mcp.paymentMethods) ? mcp.paymentMethods : []),
-    ...(Array.isArray(ctx.paymentMethods) ? ctx.paymentMethods : []),
-  ])).filter(Boolean);
+  const payments = getAvailablePaymentMethods(runtime, conversation);
   const delivery = Array.isArray(mcp.deliveryAreas) && mcp.deliveryAreas.length
     ? mcp.deliveryAreas
     : (Array.isArray(ctx.deliveryAreas) ? ctx.deliveryAreas : []);
@@ -1964,7 +2059,9 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   const normalizedText = normalized.normalizedText || groupedText;
   const classification = await classifierAgent({ runtime, conversation, groupedText: normalizedText });
   const missingBeforeExtraction = runtime.segment === 'restaurant'
-    ? restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed)
+    ? restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+      itemsPhaseComplete: conversation.itemsPhaseComplete,
+    })
     : [];
   const hasOpenTransaction = runtime.segment === 'restaurant'
     && (
