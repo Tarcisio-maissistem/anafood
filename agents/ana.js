@@ -531,12 +531,20 @@ async function classifierAgent({ runtime, conversation, groupedText }) {
   if (/\b(horario|funcionamento|endereco|endereço|pagamento|formas de pagamento|valor|pre[cç]o|card[aá]pio|cardapio|menu)\b/.test(lower)) {
     return { intent: INTENTS.CONSULTA, requires_extraction: false, handoff: false, confidence: 0.95 };
   }
-  const hasOrderSignal = /quero|pedido|comprar|marmita|pizza|lanche|agendar|marcar/.test(lower);
-  const hasGreetingSignal = /oi|ola|olá|bom dia|boa tarde|boa noite/.test(lower);
-  if (hasOrderSignal) return { intent: INTENTS.NOVO_PEDIDO, requires_extraction: true, handoff: false, confidence: hasGreetingSignal ? 0.9 : 0.8 };
-  if (hasGreetingSignal) return { intent: INTENTS.SAUDACAO, requires_extraction: false, handoff: false, confidence: 0.8 };
+  // Sinais claros de pedido (inclui nomes de alimentos comuns)
+  const hasOrderSignal = /quero|quer(ia|o)\b|pedi(do|r)|comprar|marmita|pizza|lanche|hamburguer|hambúrguer|burger|frango|carne|prato|suco|refri|coca|cerveja|agua|acai|açaí|esfiha|pastel|batata|sobremesa|salada|wrap|porção|porcao|combo|tapioca|coxinha|empada|torta|bolo|sorvete|salgado|sanduiche|sanduíche|x-/.test(lower);
+  const hasGreetingSignal = /^(oi|olá|ola|bom dia|boa tarde|boa noite)[\s!,.]*$/.test(lower.trim());
+  if (hasOrderSignal) return { intent: INTENTS.NOVO_PEDIDO, requires_extraction: true, handoff: false, confidence: hasGreetingSignal ? 0.9 : 0.85 };
+  if (hasGreetingSignal) return { intent: INTENTS.SAUDACAO, requires_extraction: false, handoff: false, confidence: 0.85 };
   if (/pix|cartao|cartão|paguei|pagamento/.test(lower)) return { intent: INTENTS.PAGAMENTO, requires_extraction: true, handoff: false, confidence: 0.7 };
   if (/cancel/.test(lower)) return { intent: INTENTS.CANCELAMENTO, requires_extraction: false, handoff: false, confidence: 0.7 };
+
+  // Quando já estamos coletando dados e a mensagem não é consulta/cancelamento,
+  // tratar como gerenciamento de pedido com extração ativa
+  const isCollecting = [STATES.COLLECTING_DATA, STATES.WAITING_CONFIRMATION, STATES.WAITING_PAYMENT].includes(conversation.state);
+  if (isCollecting) {
+    return { intent: INTENTS.GERENCIAMENTO, requires_extraction: true, handoff: false, confidence: 0.6 };
+  }
 
   if (!openai) {
     return { intent: INTENTS.CONSULTA, requires_extraction: false, handoff: false, confidence: 0.5 };
@@ -547,15 +555,15 @@ async function classifierAgent({ runtime, conversation, groupedText }) {
       temperature: 0,
       max_tokens: 120,
       messages: [
-        { role: 'system', content: 'Classifique a intencao e retorne somente JSON com intent,requires_extraction,handoff,confidence.' },
+        { role: 'system', content: 'Classifique a intencao e retorne somente JSON com intent,requires_extraction,handoff,confidence. Intents: SAUDACAO,NOVO_PEDIDO,REPETIR,CONSULTA,GERENCIAMENTO,CANCELAMENTO,PAGAMENTO,SUPORTE,HUMANO,SPAM.' },
         { role: 'user', content: JSON.stringify({ state: conversation.state, segment: runtime.segment, summary: conversation.contextSummary, message: groupedText }) },
       ],
     });
     const p = JSON.parse(c.choices?.[0]?.message?.content || '{}');
-    const intent = INTENTS[p.intent] ? p.intent : INTENTS.CONSULTA;
+    const intent = INTENTS[p.intent] ? p.intent : INTENTS.GERENCIAMENTO;
     return { intent, requires_extraction: Boolean(p.requires_extraction), handoff: Boolean(p.handoff), confidence: Number(p.confidence || 0.5) };
   } catch (_) {
-    return { intent: INTENTS.CONSULTA, requires_extraction: false, handoff: false, confidence: 0.5 };
+    return { intent: INTENTS.GERENCIAMENTO, requires_extraction: true, handoff: false, confidence: 0.4 };
   }
 }
 
@@ -775,8 +783,11 @@ function applySnapshotToConversation(conversation, snapshot) {
 
 function orchestrate({ runtime, conversation, customer, classification, extracted, groupedText }) {
   if (runtime.segment === 'restaurant') {
-    // Don't add items from consultation messages – avoids sentences like "Qual o horário?" becoming order items
-    const mergeExtracted = (classification.intent === INTENTS.CONSULTA)
+    // Só limpa items do merge quando o extractor NÃO encontrou nenhum item na mensagem.
+    // Evita que "Qual o horário?" vire item, mas preserva "Hambúrguer" mesmo que o
+    // classifier chame de CONSULTA por incerteza.
+    const extractedHasItems = Array.isArray(extracted?.items) && extracted.items.length > 0;
+    const mergeExtracted = (classification.intent === INTENTS.CONSULTA && !extractedHasItems)
       ? { ...extracted, items: [] }
       : (extracted || {});
     mergeRestaurantTransaction(conversation, mergeExtracted);
@@ -1985,6 +1996,8 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     'REQUEST_ADJUSTMENTS',
     'PAYMENT_REMINDER',
     'FLOW_CANCELLED',
+    'UPSELL_SUGGEST',    // fallbackText garante sugestão de extras — não delegar ao LLM
+    'ANSWER_AND_CONFIRM', // fallbackText responde + relembra o pedido
   ]);
 
   const reply = orchestratorResult.action === 'WELCOME'

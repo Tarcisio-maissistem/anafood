@@ -268,7 +268,14 @@
       state.instance = data.instance;
       ui.instanceInfo.textContent = `Instância: ${state.instance || '(não definida)'}`;
     }
-    state.conversations = data.conversations || [];
+    const fresh = data.conversations || [];
+    // Preservar avatarUrls já obtidos em pollings anteriores
+    if (state.conversations.length) {
+      const prevMap = new Map(state.conversations.map(c => [c.phone, c.avatarUrl]));
+      for (const c of fresh) { if (!c.avatarUrl && prevMap.get(c.phone)) c.avatarUrl = prevMap.get(c.phone); }
+    }
+    state.conversations = fresh;
+    lazyFetchAvatars(state.conversations);
     if (state.selectedConversationKey) {
       const found = state.conversations.find(c => String(c.phone || c.remoteJid || '') === state.selectedConversationKey);
       if (found) {
@@ -625,6 +632,7 @@
       // Avatar
       const avEl = document.createElement('div');
       avEl.className = 'conv-av';
+      avEl.dataset.phone = rowKey; // para atualização lazy sem re-render da lista
       if (conv.avatarUrl) {
         avEl.innerHTML = `<img src="${escapeHtml(conv.avatarUrl)}" alt="avatar" />`;
       } else {
@@ -665,6 +673,38 @@
 
       ui.list.appendChild(item);
     }
+  }
+
+  /* Atualiza apenas o elemento de avatar de um item da lista (sem re-render) */
+  function updateConvAvatarInDom(phone, url) {
+    const key = String(phone || '');
+    const avEl = ui.list.querySelector(`.conv-av[data-phone="${CSS.escape(key)}"]`);
+    if (!avEl) return;
+    avEl.textContent = '';
+    avEl.innerHTML = `<img src="${escapeHtml(url)}" alt="avatar" />`;
+  }
+
+  /* Busca avatares em lote para conversas sem foto — máx 15 para não sobrecarregar */
+  function lazyFetchAvatars(convs) {
+    const needAvatar = (convs || []).filter(c => !c.avatarUrl && c.phone);
+    needAvatar.slice(0, 15).forEach((conv, idx) => {
+      setTimeout(() => {
+        const phone = encodeURIComponent(conv.phone);
+        const ti = encodeURIComponent(state.tenantId);
+        const inst = encodeURIComponent(state.instance);
+        fetch(`/api/ana/profile-picture?tenant_id=${ti}&instance=${inst}&phone=${phone}`)
+          .then(r => r.ok ? r.json() : {})
+          .then(data => {
+            const url = String(data?.url || '').trim();
+            if (!url) return;
+            // Atualiza o objeto na memória
+            conv.avatarUrl = url;
+            // Atualiza só o elemento de avatar no DOM
+            updateConvAvatarInDom(conv.phone, url);
+          })
+          .catch(() => {});
+      }, idx * 200); // espaçamento de 200ms entre cada request
+    });
   }
 
   /* ══════════════════════ EVENTS ══════════════════════ */
