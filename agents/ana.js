@@ -55,6 +55,8 @@ const STATE_FILE = process.env.ANA_STATE_FILE
   : path.join(__dirname, '..', 'data', 'ana_state.json');
 
 let persistTimer = null;
+const MAX_CUSTOMER_RECENT_MEMORY = 24;
+const MAX_PROMPT_MEMORY_ITEMS = 8;
 
 const nowISO = () => new Date().toISOString();
 const cleanText = (t) => String(t || '').replace(/\s+/g, ' ').trim();
@@ -344,6 +346,8 @@ function tenantRuntime(tenant, runtimeOverrides = {}) {
     customPrompt: tenant?.agent?.customPrompt || '',
     model: tenant?.agent?.model || 'gpt-4o-mini',
     temperature: typeof tenant?.agent?.temperature === 'number' ? tenant.agent.temperature : 0.5,
+    llmFirstResponse: tenant?.agent?.llmFirstResponse !== false
+      && String(process.env.ANA_LLM_FIRST_RESPONSE || 'true').toLowerCase() !== 'false',
     bufferWindowMs: Number.isFinite(bufferWindowMs) ? Math.max(1000, Math.min(120000, bufferWindowMs)) : AGENT_DEFAULTS.bufferWindowMs,
     greetingMessage: greetingMessage || AGENT_DEFAULTS.greetingMessage,
     greetingOncePerDay: true,
@@ -416,6 +420,8 @@ function getCustomer(tenantId, phone) {
       totalOrders: 0,
       lastOrderSnapshot: null,
       lastOrderSummary: '',
+      recentContext: [],
+      recentContextSummary: '',
     };
     customers.set(key, c);
   }
@@ -423,6 +429,8 @@ function getCustomer(tenantId, phone) {
   if (typeof c.name !== 'string') c.name = '';
   if (typeof c.lastOrderSummary !== 'string') c.lastOrderSummary = '';
   if (typeof c.lastOrderSnapshot === 'undefined') c.lastOrderSnapshot = null;
+  if (!Array.isArray(c.recentContext)) c.recentContext = [];
+  if (typeof c.recentContextSummary !== 'string') c.recentContextSummary = '';
   c.updatedAt = nowISO();
   return c;
 }
@@ -503,6 +511,23 @@ function appendMessage(conv, role, content, metadata = {}) {
   if (conv.messages.length > 30) conv.messages = conv.messages.slice(-30);
   conv.messageCount = (conv.messageCount || 0) + 1;
   conv.lastActivityAt = nowISO();
+}
+
+function appendCustomerMemory(customer, role, content, metadata = {}, state = '') {
+  if (!customer) return;
+  const text = cleanText(content);
+  if (!text) return;
+  if (!Array.isArray(customer.recentContext)) customer.recentContext = [];
+  customer.recentContext.push({
+    role: role === 'assistant' ? 'assistant' : 'user',
+    content: text.slice(0, 400),
+    action: cleanText(metadata?.action || ''),
+    state: cleanText(state || ''),
+    at: nowISO(),
+  });
+  if (customer.recentContext.length > MAX_CUSTOMER_RECENT_MEMORY) {
+    customer.recentContext = customer.recentContext.slice(-MAX_CUSTOMER_RECENT_MEMORY);
+  }
 }
 
 function normalizeCatalog(rawCatalog) {
@@ -1217,6 +1242,7 @@ function scheduleFollowUp(conv, evolutionConfig) {
         : 'Ainda está por aí? Posso continuar com seu pedido 😊';
       await sendWhatsAppMessage(phone, msg, minimalRuntime, remoteJid);
       appendMessage(current, 'assistant', msg, { action: 'FOLLOWUP_WARNING' });
+      appendCustomerMemory(getCustomer(current.tenantId || 'default', current.phone), 'assistant', msg, { action: 'FOLLOWUP_WARNING' }, current.state);
       persistStateDebounced();
     } catch (_) {}
   }, 5 * 60 * 1000);
@@ -1231,6 +1257,7 @@ function scheduleFollowUp(conv, evolutionConfig) {
         : 'Como não tivemos resposta por um tempo, cancelei o pedido. Quando quiser é só me chamar 😊';
       await sendWhatsAppMessage(phone, msg, minimalRuntime, remoteJid);
       appendMessage(current, 'assistant', msg, { action: 'FOLLOWUP_CANCEL' });
+      appendCustomerMemory(getCustomer(current.tenantId || 'default', current.phone), 'assistant', msg, { action: 'FOLLOWUP_CANCEL' }, current.state);
       current.state = STATES.INIT;
       current.stateUpdatedAt = nowISO();
       current.transaction = {
@@ -1561,7 +1588,7 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
 
   if (action === 'WELCOME') {
     const identity = companyName
-      ? `Aqui é a ${agentName} do ${companyName} 😊`
+      ? `Aqui é a ${agentName}, assistente virtual da ${companyName} 😊`
       : `Aqui é a ${agentName} 😊`;
     return firstName
       ? `Olá, ${firstName}! ${identity} Como posso te ajudar hoje?`
@@ -1850,6 +1877,13 @@ function buildContextualAnswer(conversation, userMessage = '') {
 }
 
 async function generatorAgent({ runtime, conversation, customer, classification, orchestratorResult, groupedText }) {
+  const recentContext = Array.isArray(customer?.recentContext) ? customer.recentContext.slice(-MAX_PROMPT_MEMORY_ITEMS) : [];
+  const recentContextForPrompt = recentContext.map((m) => {
+    const who = m.role === 'assistant' ? 'Agente' : 'Cliente';
+    const action = cleanText(m.action || '');
+    const tag = action ? ` [${action}]` : '';
+    return `${who}${tag}: ${cleanText(m.content || '')}`;
+  });
   const deterministic = {
     state: conversation.state,
     action: orchestratorResult.action,
@@ -1863,6 +1897,8 @@ async function generatorAgent({ runtime, conversation, customer, classification,
       customerName: cleanText(customer?.name || ''),
       totalOrders: Number(customer?.totalOrders || 0),
       lastOrderSummary: cleanText(customer?.lastOrderSummary || ''),
+      recentContextSummary: cleanText(customer?.recentContextSummary || ''),
+      recentContext: recentContextForPrompt,
     },
     companyContext: runtime.companyContext || {},
     companyMcp: conversation.companyData || {},
@@ -1880,9 +1916,9 @@ async function generatorAgent({ runtime, conversation, customer, classification,
       messages: [
         {
           role: 'system',
-          content: `Você é ${runtime.agentName}${companyName ? `, atendente virtual do ${companyName}` : ', atendente virtual'}. Tom: ${runtime.tone}.
+          content: `Você é ${runtime.agentName}${companyName ? `, assistente virtual da ${companyName}` : ', assistente virtual'}. Tom: ${runtime.tone}.
 
-IDENTIDADE: Sempre se apresente como ${runtime.agentName}${companyName ? ` do ${companyName}` : ''} no primeiro contato do dia.
+IDENTIDADE: Sempre se apresente como ${runtime.agentName}${companyName ? `, assistente virtual da ${companyName}` : ''} no primeiro contato do dia.
 
 PERSONALIDADE: Seja calorosa, empática e proativa. Use o nome do cliente quando souber (${customerFirstName ? `nome atual: ${customerFirstName}` : 'pergunte o nome se ainda não souber'}). Trate o cliente como pessoa, não como ticket.
 
@@ -1935,6 +1971,8 @@ ${runtime.customPrompt ? `\nINSTRUÇÕES ESPECÍFICAS DO ESTABELECIMENTO:\n${run
           content: JSON.stringify({
             deterministic,
             summary: conversation.contextSummary,
+            customerMemorySummary: cleanText(customer?.recentContextSummary || ''),
+            customerRecentContext: recentContextForPrompt,
           }),
         },
       ],
@@ -1946,9 +1984,12 @@ ${runtime.customPrompt ? `\nINSTRUÇÕES ESPECÍFICAS DO ESTABELECIMENTO:\n${run
   }
 }
 
-async function maybeSummarize({ runtime, conversation }) {
+async function maybeSummarize({ runtime, conversation, customer = null }) {
   if ((conversation.messageCount || 0) % SUMMARY_EVERY_N_MESSAGES !== 0) return;
-  if (!openai) return;
+  if (!openai) {
+    if (customer && conversation.contextSummary) customer.recentContextSummary = cleanText(conversation.contextSummary);
+    return;
+  }
   try {
     const c = await openai.chat.completions.create({
       model: runtime.model,
@@ -1960,6 +2001,7 @@ async function maybeSummarize({ runtime, conversation }) {
       ],
     });
     conversation.contextSummary = cleanText(c.choices?.[0]?.message?.content || conversation.contextSummary || '');
+    if (customer) customer.recentContextSummary = cleanText(conversation.contextSummary || customer.recentContextSummary || '');
   } catch (_) {}
 }
 
@@ -2223,6 +2265,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
         });
       }
       appendMessage(conversation, 'assistant', failText, { action: 'ORDER_PRE_VALIDATION_ERROR' });
+      appendCustomerMemory(customer, 'assistant', failText, { action: 'ORDER_PRE_VALIDATION_ERROR' }, conversation.state);
       persistStateDebounced();
       return { success: true, reply: failText };
     }
@@ -2257,6 +2300,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
         });
       }
       appendMessage(conversation, 'assistant', failText, { action: 'ORDER_CREATE_ERROR' });
+      appendCustomerMemory(customer, 'assistant', failText, { action: 'ORDER_CREATE_ERROR' }, conversation.state);
       persistStateDebounced();
       return { success: true, reply: failText };
     }
@@ -2284,21 +2328,30 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     conversation.consecutiveFailures = 0;
   }
 
-  const deterministicActions = new Set([
+  const strictDeterministicActions = new Set([
     'ASK_MISSING_FIELDS',
     'ASK_FIELD_CONFIRMATION',
+    'ASK_REPEAT_LAST_ORDER',
+    'ORDER_REVIEW',
+    'PAYMENT_REMINDER',
+    'FLOW_CANCELLED',
+    'CREATE_ORDER_AND_WAIT_PAYMENT',
+    'CREATE_ORDER_AND_CONFIRM',
+    'PAYMENT_CONFIRMED',
+    'BLOCK_NEW_ORDER_UNTIL_FINISH',
+    'POST_CONFIRMATION_SUPPORT',
+  ]);
+  const legacyDeterministicActions = new Set([
+    ...Array.from(strictDeterministicActions),
     'ANSWER_AND_RESUME',
     'ANSWER_AND_RESUME_CONFIRM',
     'ANSWER_AND_RESUME_REPEAT',
-    'ASK_REPEAT_LAST_ORDER',
-    'ORDER_REVIEW',
     'ASK_CONFIRMATION',
     'REQUEST_ADJUSTMENTS',
-    'PAYMENT_REMINDER',
-    'FLOW_CANCELLED',
-    'UPSELL_SUGGEST',    // fallbackText garante sugestão de extras — não delegar ao LLM
-    'ANSWER_AND_CONFIRM', // fallbackText responde + relembra o pedido
+    'UPSELL_SUGGEST',
+    'ANSWER_AND_CONFIRM',
   ]);
+  const deterministicActions = runtime.llmFirstResponse ? strictDeterministicActions : legacyDeterministicActions;
 
   const reply = orchestratorResult.action === 'WELCOME'
     ? (() => {
@@ -2315,7 +2368,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       const companyN = getCompanyDisplayName(runtime, conversation);
       const clientFirstName = cleanText(customer?.name || conversation.transaction?.customer_name || '').split(' ')[0];
       const personalGreeting = clientFirstName ? `Olá, ${clientFirstName}! ` : 'Olá! ';
-      const identity = companyN ? `Aqui é a ${agentN} do ${companyN} 😊` : `Aqui é a ${agentN} 😊`;
+      const identity = companyN ? `Aqui é a ${agentN}, assistente virtual da ${companyN} 😊` : `Aqui é a ${agentN} 😊`;
       const greetingBase = `${personalGreeting}${identity}`;
       return followUp ? `${greetingBase}\n\n${followUp}`.trim() : greetingBase;
     })()
@@ -2361,6 +2414,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     prevState: previousState,
     nextState: conversation.state,
   });
+  appendCustomerMemory(customer, 'assistant', reply, { action: orchestratorResult.action }, conversation.state);
 
   // Sincronizar nome extraído para o perfil persistente do cliente
   if (cleanText(conversation.transaction.customer_name) && !cleanText(customer.name)) {
@@ -2370,7 +2424,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   // Armazenar config de envio na conversa para uso pelos timers de follow-up
   conversation.evolutionConfig = { ...runtime.evolution };
 
-  await maybeSummarize({ runtime, conversation });
+  await maybeSummarize({ runtime, conversation, customer });
 
   // Agendar follow-up automático (5 min aviso, 30 min cancelamento)
   scheduleFollowUp(conversation, runtime.evolution);
@@ -2425,6 +2479,9 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
         originalText: normalized.originalText,
         transcription: normalized.transcription,
       });
+      appendCustomerMemory(customer, 'user', normalized.normalizedText || groupedText, {
+        sourceType: normalized.sourceType,
+      }, conversation.state);
       await runPipeline({ conversation, customer, groupedText, normalized, runtime, apiRequest, getEnvConfig, log, onSend });
       // Fire-and-forget: persist mensagem do usuário no Supabase msg_history
       saveInboundMessage({
@@ -2451,6 +2508,7 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
         });
       }
       appendMessage(conversation, 'assistant', failText, { action: 'PIPELINE_ERROR' });
+      appendCustomerMemory(customer, 'assistant', failText, { action: 'PIPELINE_ERROR' }, conversation.state);
       persistStateDebounced();
     } finally {
       processing.delete(key);
