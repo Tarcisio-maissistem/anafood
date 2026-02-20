@@ -608,12 +608,20 @@ function sanitizeAssistantReply({ reply, conversation, action }) {
   const normalizedSeen = new Set();
   const uniqueLines = [];
   for (const line of text.split('\n')) {
-    const cleanLine = cleanText(line);
-    const key = normalizeForMatch(cleanLine);
-    if (!key) continue;
+    const trimmedLine = line.trim();
+    // Preservar linhas vazias como espaçamento entre seções
+    if (!trimmedLine) {
+      // Evitar mais de 2 linhas vazias consecutivas
+      if (uniqueLines.length === 0 || uniqueLines[uniqueLines.length - 1] !== '') {
+        uniqueLines.push('');
+      }
+      continue;
+    }
+    const key = normalizeForMatch(trimmedLine);
+    if (!key) { uniqueLines.push(trimmedLine); continue; }
     if (normalizedSeen.has(key)) continue;
     normalizedSeen.add(key);
-    uniqueLines.push(cleanLine);
+    uniqueLines.push(trimmedLine);
   }
   text = uniqueLines.join('\n').trim();
 
@@ -2066,12 +2074,15 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   const companyName = getCompanyDisplayName(runtime, conversation);
 
   if (action === 'WELCOME') {
-    const identity = companyName
-      ? `Aqui é a ${agentName}, assistente virtual da ${companyName} 😊`
-      : `Aqui é a ${agentName} 😊`;
+    if (firstName && companyName) {
+      return `Olá ${firstName}, aqui é a ${agentName} do ${companyName} 👋\nComo posso te ajudar hoje?`;
+    }
+    if (companyName) {
+      return `Olá! Aqui é a ${agentName} do ${companyName} 👋\nQual seu nome para eu registrar aqui?`;
+    }
     return firstName
-      ? `Olá, ${firstName}! ${identity} Como posso te ajudar hoje?`
-      : `Olá! ${identity} Como posso te ajudar hoje?`;
+      ? `Olá ${firstName}, aqui é a ${agentName} 👋\nComo posso te ajudar hoje?`
+      : `Olá! Aqui é a ${agentName} 👋\nQual seu nome para eu registrar aqui?`;
   }
 
   if (action === 'ASK_REPEAT_LAST_ORDER') {
@@ -2232,11 +2243,17 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
 function buildInitialGreeting(runtime, conversation, customer) {
   const firstName = cleanText(customer?.name || conversation?.transaction?.customer_name || '').split(' ')[0] || '';
   const companyName = getCompanyDisplayName(runtime, conversation);
-  const who = firstName ? `Olá, ${firstName}!` : 'Olá!';
-  const identity = companyName
-    ? `Aqui é a ${runtime?.agentName || 'Ana'}, assistente virtual da ${companyName}.`
-    : `Aqui é a ${runtime?.agentName || 'Ana'}.`;
-  return `${who}\n\n${identity}`;
+  const agentName = runtime?.agentName || 'Ana';
+  if (firstName && companyName) {
+    return `Olá ${firstName}, aqui é a ${agentName} do ${companyName} 👋`;
+  }
+  if (companyName) {
+    return `Olá! Aqui é a ${agentName} do ${companyName} 👋\nQual seu nome para eu registrar aqui?`;
+  }
+  if (firstName) {
+    return `Olá ${firstName}, aqui é a ${agentName} 👋`;
+  }
+  return `Olá! Aqui é a ${agentName} 👋\nQual seu nome para eu registrar aqui?`;
 }
 
 function buildMenuReply(conversation, followUp = '') {
