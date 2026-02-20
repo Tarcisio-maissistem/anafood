@@ -530,6 +530,28 @@ function appendCustomerMemory(customer, role, content, metadata = {}, state = ''
   }
 }
 
+function sanitizeAssistantReply({ reply, conversation, action }) {
+  let text = String(reply || '').trim();
+  if (!text) return '';
+
+  const firstInteraction = !Boolean(conversation?.greeted);
+  const allowIntroduction = firstInteraction && action === 'WELCOME';
+  if (!allowIntroduction) {
+    text = text
+      .replace(
+        /(?:^|\n)\s*ol[aá][^.!?\n]{0,60}[!,.]?\s*sou a\s+[^.!?\n]{0,120}assistente virtual da\s+[^.!?\n]{1,120}[.!?]?\s*/i,
+        ''
+      )
+      .replace(
+        /(?:^|\n)\s*sou a\s+[^.!?\n]{0,120}assistente virtual da\s+[^.!?\n]{1,120}[.!?]?\s*/i,
+        ''
+      )
+      .trim();
+  }
+
+  return text || String(reply || '').trim();
+}
+
 function normalizeCatalog(rawCatalog) {
   const list = Array.isArray(rawCatalog) ? rawCatalog : (rawCatalog.items || rawCatalog.products || []);
   const seen = new Set();
@@ -2415,7 +2437,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   ]);
   const deterministicActions = runtime.llmFirstResponse ? strictDeterministicActions : legacyDeterministicActions;
 
-  const reply = orchestratorResult.action === 'WELCOME'
+  const rawReply = orchestratorResult.action === 'WELCOME'
     ? (() => {
       const firstMissing = (orchestratorResult.missing || [])[0];
       const hasPendingValue = firstMissing === 'items'
@@ -2459,6 +2481,11 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       }
       return null;
     })() || await generatorAgent({ runtime, conversation, customer, classification, orchestratorResult, groupedText: normalized.normalizedText || groupedText });
+  const reply = sanitizeAssistantReply({
+    reply: rawReply,
+    conversation,
+    action: orchestratorResult.action,
+  });
   if (conversation.state !== STATES.HUMAN_HANDOFF || !conversation.handoffNotified) {
     const sent = await sendWhatsAppMessage(conversation.phone, reply, runtime, conversation.remoteJid);
     if (sent && typeof onSend === 'function') {
@@ -2470,6 +2497,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       });
     }
     if (conversation.state === STATES.HUMAN_HANDOFF) conversation.handoffNotified = true;
+    if (sent) conversation.greeted = true;
   }
 
   appendMessage(conversation, 'assistant', reply, {
