@@ -13,7 +13,7 @@
         "companyCnpj": "27.644.092/0001-07",
         "restaurant": {
           "requireAddress": true,
-          "orderProvider": "saipos",
+          "orderProvider": "anafood",
           "openingHours": "Seg a Dom, 10:00 as 23:00"
         }
       },

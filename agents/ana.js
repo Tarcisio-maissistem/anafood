@@ -235,35 +235,41 @@ const normalizeStateUF = (value) => {
 
 function extractAddressFromText(text) {
   const raw = String(text || '');
-  const lower = raw.toLowerCase();
+  const sanitized = raw
+    .replace(/\b(no|na)\s+(dinheiro|pix|cart[aã]o|cartao|cr[eé]dito|debito|d[eé]bito)\b.*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const lower = sanitized.toLowerCase();
   const out = {};
 
-  const streetMatch = raw.match(/\b(rua|av(?:enida)?|alameda|travessa|quadra|qd)\s+([^,]+)/i);
+  const streetMatch = sanitized.match(/\b(rua|av(?:enida)?|alameda|travessa|quadra|qd)\s+([^,]+)/i);
   if (streetMatch) out.street_name = cleanText(`${streetMatch[1]} ${streetMatch[2]}`);
 
-  if (/\b(sem\s*n[uú]mero|s\/n)\b/i.test(raw)) out.street_number = 'S/N';
-  const numberMatch = raw.match(/\b(?:n(?:[úu]mero)?|num|casa)\s*[:#-]?\s*([0-9]{1,6}|s\/n)\b/i);
+  if (/\b(sem\s*n[uú]mero|s\/n)\b/i.test(sanitized)) out.street_number = 'S/N';
+  const qdLtMatch = sanitized.match(/\b(qd\.?\s*\d+\s*lt\.?\s*\d+)\b/i);
+  if (!out.street_number && qdLtMatch) out.street_number = cleanText(qdLtMatch[1]).replace(/\s+/g, ' ');
+  const numberMatch = sanitized.match(/\b(?:n(?:[úu]mero)?|num|casa)\s*[:#-]?\s*([0-9]{1,6}|s\/n)\b/i);
   if (!out.street_number && numberMatch) out.street_number = String(numberMatch[1]).toUpperCase() === 'S/N' ? 'S/N' : cleanText(numberMatch[1]);
-  if (!out.street_number && /\b0\b/.test(lower) && /(n[uú]mero|num|casa|sem numero)/i.test(raw)) out.street_number = 'S/N';
+  if (!out.street_number && /\b0\b/.test(lower) && /(n[uú]mero|num|casa|sem numero)/i.test(sanitized)) out.street_number = 'S/N';
 
-  const neighborhoodMatch = raw.match(/\b(?:bairro|setor|jd|jardim|parque)\s+([^,]+)/i);
+  const neighborhoodMatch = sanitized.match(/\b(?:bairro|setor|jd|jardim|parque)\s+([^,]+)/i);
   if (neighborhoodMatch) {
-    out.neighborhood = cleanText(neighborhoodMatch[1]);
+    out.neighborhood = cleanText(neighborhoodMatch[1]).replace(/\b(no|na)\s+(dinheiro|pix|cart[aã]o|cartao|cr[eé]dito|debito|d[eé]bito)\b.*/i, '').trim();
   }
 
-  const cityUfSlash = raw.match(/\b([A-Za-zÀ-ÿ\s]+)\s*\/\s*([A-Za-z]{2})\b/);
+  const cityUfSlash = sanitized.match(/\b([A-Za-zÀ-ÿ\s]+)\s*\/\s*([A-Za-z]{2})\b/);
   if (cityUfSlash) {
     out.city = cleanText(cityUfSlash[1]);
     out.state = normalizeStateUF(cityUfSlash[2]);
   } else {
-    const cityUfInline = raw.match(/\b([A-Za-zÀ-ÿ\s]+)\s+([A-Za-z]{2})\b$/);
+    const cityUfInline = sanitized.match(/\b([A-Za-zÀ-ÿ\s]+)\s+([A-Za-z]{2})\b$/);
     if (cityUfInline) {
       out.city = cleanText(cityUfInline[1]);
       out.state = normalizeStateUF(cityUfInline[2]);
     }
   }
 
-  const cep = raw.match(/\b\d{5}-?\d{3}\b|\b\d{8}\b/);
+  const cep = sanitized.match(/\b\d{5}-?\d{3}\b|\b\d{8}\b/);
   if (cep) out.postal_code = String(cep[0]).replace(/\D/g, '');
 
   return out;
@@ -782,7 +788,7 @@ async function extractorAgent({ runtime, groupedText }) {
 
   const lower = groupedText.toLowerCase();
   const out = {
-    mode: /retirada|retirar|balcao/.test(lower) ? 'TAKEOUT' : (/entrega|delivery/.test(lower) ? 'DELIVERY' : null),
+    mode: /retirada|retirar|balcao/.test(lower) ? 'TAKEOUT' : (/entreg|delivery/.test(lower) ? 'DELIVERY' : null),
     payment: /(pix|piz|piks|piquis)\b/.test(lower) ? 'PIX'
       : (/(cartao|cartão|cr[eé]dito|d[eé]bito)/.test(lower) ? 'CARD'
       : (/dinheiro|especie|espécie|cash|nota/.test(lower) ? 'CASH' : null)),
@@ -800,6 +806,7 @@ async function extractorAgent({ runtime, groupedText }) {
   if (obsMatch) out.notes = cleanText(obsMatch[1]);
 
   Object.assign(out.address, extractAddressFromText(groupedText));
+  if (!out.mode && (cleanText(out.address?.street_name) || cleanText(out.address?.neighborhood))) out.mode = 'DELIVERY';
   out.items = extractItemsFromFreeText(groupedText);
 
   return out;
@@ -1452,7 +1459,11 @@ async function createSaiposOrder({ conversation, runtime, apiRequest, getEnvConf
   const { resolved, unresolved } = resolveItemsWithCatalog(conversation.transaction.items, conversation.catalog || []);
   if (unresolved.length) return { ok: false, unresolved };
 
-  const total_amount = resolved.reduce((sum, i) => sum + (i.unit_price * i.quantity), 0);
+  const feeInfo = (conversation.transaction.mode || 'DELIVERY') === 'DELIVERY'
+    ? resolveDeliveryFee(conversation, conversation.transaction)
+    : null;
+  const deliveryFeeCents = feeInfo ? Math.round(Number(feeInfo.fee || 0) * 100) : 0;
+  const total_amount = resolved.reduce((sum, i) => sum + (i.unit_price * i.quantity), 0) + deliveryFeeCents;
   conversation.transaction.total_amount = total_amount;
 
   const order_id = `${runtime.id}-ANA-${Date.now()}`;
@@ -1472,7 +1483,7 @@ async function createSaiposOrder({ conversation, runtime, apiRequest, getEnvConf
       mode: conversation.transaction.mode || 'DELIVERY',
       scheduled: false,
       delivery_date_time: nowISO(),
-      ...((conversation.transaction.mode || 'DELIVERY') === 'DELIVERY' ? { delivery_by: 'RESTAURANT', delivery_fee: 0 } : {}),
+      ...((conversation.transaction.mode || 'DELIVERY') === 'DELIVERY' ? { delivery_by: 'RESTAURANT', delivery_fee: deliveryFeeCents } : {}),
     },
     customer: { id: conversation.phone, name: cleanText(tx.customer_name || 'Cliente WhatsApp'), phone: conversation.phone },
     ...(((conversation.transaction.mode || 'DELIVERY') === 'DELIVERY') ? {
@@ -1520,7 +1531,11 @@ async function createAnaFoodOrder({ conversation, runtime, log }) {
   const { resolved, unresolved } = resolveItemsWithCatalog(conversation.transaction.items, conversation.catalog || []);
   if (unresolved.length) return { ok: false, unresolved };
 
-  const total_amount = resolved.reduce((sum, i) => sum + (i.unit_price * i.quantity), 0);
+  const feeInfo = (conversation.transaction.mode || 'DELIVERY') === 'DELIVERY'
+    ? resolveDeliveryFee(conversation, conversation.transaction)
+    : null;
+  const deliveryFeeCents = feeInfo ? Math.round(Number(feeInfo.fee || 0) * 100) : 0;
+  const total_amount = resolved.reduce((sum, i) => sum + (i.unit_price * i.quantity), 0) + deliveryFeeCents;
   conversation.transaction.total_amount = total_amount;
 
   const items = resolved.map((i) => ({
@@ -1547,7 +1562,7 @@ async function createAnaFoodOrder({ conversation, runtime, log }) {
       state: tx.address.state || '',
       zip_code: (tx.address.postal_code || '').replace(/\D/g, ''),
       items,
-      delivery_fee: 0,
+      delivery_fee: Number((deliveryFeeCents || 0) / 100),
       total: Number((total_amount || 0) / 100),
       observations: cleanText(tx.notes || ''),
     },
@@ -1598,9 +1613,22 @@ async function createOrderByProviderIfNeeded({ conversation, runtime, apiRequest
   if (conversation.transaction.order_id) return { ok: true, already: true };
 
   if (runtime.orderProvider === 'anafood') {
+    const ana = await createAnaFoodOrder({ conversation, runtime, log });
+    if (ana.ok) return ana;
+    if (runtime?.saipos?.production?.baseUrl || runtime?.saipos?.homologation?.baseUrl) {
+      log('INFO', 'Ana: fallback para SAIPOS apos falha no AnaFood', { tenantId: runtime.id, phone: conversation.phone, err: ana.error || '' });
+      return createSaiposOrder({ conversation, runtime, apiRequest, getEnvConfig, log });
+    }
+    return ana;
+  }
+
+  const saipos = await createSaiposOrder({ conversation, runtime, apiRequest, getEnvConfig, log });
+  if (saipos.ok) return saipos;
+  if (runtime.anafood?.endpoint) {
+    log('INFO', 'Ana: fallback para AnaFood apos falha no SAIPOS', { tenantId: runtime.id, phone: conversation.phone, err: saipos.error || '' });
     return createAnaFoodOrder({ conversation, runtime, log });
   }
-  return createSaiposOrder({ conversation, runtime, apiRequest, getEnvConfig, log });
+  return saipos;
 }
 
 function toReaisAmount(v) {
