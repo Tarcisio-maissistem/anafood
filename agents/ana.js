@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 const fs = require('fs');
 const path = require('path');
@@ -252,9 +252,13 @@ function extractAddressFromText(text) {
   if (!out.street_number && numberMatch) out.street_number = String(numberMatch[1]).toUpperCase() === 'S/N' ? 'S/N' : cleanText(numberMatch[1]);
   if (!out.street_number && /\b0\b/.test(lower) && /(n[uú]mero|num|casa|sem numero)/i.test(sanitized)) out.street_number = 'S/N';
 
-  const neighborhoodMatch = sanitized.match(/\b(?:bairro|setor|jd|jardim|parque)\s+([^,]+)/i);
+  const neighborhoodMatch = sanitized.match(/\b(bairro|setor|jd|jardim|parque)\s+([^,]+)/i);
   if (neighborhoodMatch) {
-    out.neighborhood = cleanText(neighborhoodMatch[1]).replace(/\b(no|na)\s+(dinheiro|pix|cart[aã]o|cartao|cr[eé]dito|debito|d[eé]bito)\b.*/i, '').trim();
+    const prefix = cleanText(neighborhoodMatch[1]).toLowerCase();
+    const base = cleanText(neighborhoodMatch[2]).replace(/\b(no|na)\s+(dinheiro|pix|cart[aã]o|cartao|cr[eé]dito|debito|d[eé]bito)\b.*/i, '').trim();
+    if (prefix === 'bairro') out.neighborhood = base;
+    else if (base.toLowerCase().startsWith(prefix)) out.neighborhood = base;
+    else out.neighborhood = cleanText(`${prefix} ${base}`);
   }
 
   const cityUfSlash = sanitized.match(/\b([A-Za-zÀ-ÿ\s]+)\s*\/\s*([A-Za-z]{2})\b/);
@@ -563,6 +567,18 @@ function sanitizeAssistantReply({ reply, conversation, action }) {
       )
       .trim();
   }
+
+  const normalizedSeen = new Set();
+  const uniqueLines = [];
+  for (const line of text.split('\n')) {
+    const cleanLine = cleanText(line);
+    const key = normalizeForMatch(cleanLine);
+    if (!key) continue;
+    if (normalizedSeen.has(key)) continue;
+    normalizedSeen.add(key);
+    uniqueLines.push(cleanLine);
+  }
+  text = uniqueLines.join('\n').trim();
 
   return text || String(reply || '').trim();
 }
@@ -902,7 +918,12 @@ function mergeRestaurantTransaction(conv, extracted) {
     for (const item of extracted.items) {
       const name = cleanText(item.name || item.nome || '');
       if (!name) continue;
-      const existing = conv.transaction.items.find((i) => i.name.toLowerCase() === name.toLowerCase());
+      const existing = conv.transaction.items.find((i) => {
+        if (cleanText(item.integration_code) && cleanText(i.integration_code)) {
+          return cleanText(i.integration_code) === cleanText(item.integration_code);
+        }
+        return i.name.toLowerCase() === name.toLowerCase();
+      });
       if (existing) {
         const before = Number(existing.quantity || 0);
         if (item.absolute) existing.quantity = toNumberOrOne(item.quantity);
@@ -1513,10 +1534,61 @@ function forceFillPendingField({ conversation, runtime, groupedText, extracted }
   }
   if (pendingField.startsWith('address.')) {
     const key = pendingField.slice('address.'.length);
-    extracted.address[key] = text;
+    const parsed = extractAddressFromText(text);
+    if (cleanText(parsed[key])) extracted.address[key] = cleanText(parsed[key]);
+    else extracted.address[key] = text;
+    for (const extraKey of ['street_name', 'street_number', 'neighborhood', 'city', 'state', 'postal_code']) {
+      if (!cleanText(extracted.address[extraKey]) && cleanText(parsed[extraKey])) {
+        extracted.address[extraKey] = cleanText(parsed[extraKey]);
+      }
+    }
     return;
   }
   extracted[pendingField] = text;
+}
+
+function calculateOrderAmounts(tx, conversation = null) {
+  const itemTotal = (tx?.items || []).reduce((sum, it) => sum + (Number(it.unit_price || 0) * Number(it.quantity || 1)), 0);
+  const feeInfo = tx?.mode === 'DELIVERY' ? resolveDeliveryFee(conversation, tx) : null;
+  const feeCents = feeInfo ? Math.round(Number(feeInfo.fee || 0) * 100) : 0;
+  return { itemTotal, feeCents, total: itemTotal + feeCents, feeInfo };
+}
+
+function generateOrderSummary(tx, conversation = null, { withConfirmation = true } = {}) {
+  const safeTx = tx || {};
+  const items = (safeTx.items || []).map((it) => {
+    const lineTotal = Number(it.unit_price || 0) * Number(it.quantity || 1);
+    return `• ${it.quantity}x ${it.name}${lineTotal > 0 ? ` - ${formatBRL(lineTotal / 100)}` : ''}`;
+  }).join('\n') || '• Sem itens';
+
+  const paymentMap = { PIX: 'PIX', CARD: 'Cartão', CASH: 'Dinheiro' };
+  const payment = paymentMap[safeTx.payment] || safeTx.payment || 'Não informado';
+  const mode = safeTx.mode === 'TAKEOUT' ? 'Retirada' : 'Entrega';
+  const addrParts = [
+    safeTx.address?.street_name,
+    safeTx.address?.street_number,
+    safeTx.address?.neighborhood,
+    safeTx.address?.city,
+  ].filter(Boolean);
+  const addressBlock = safeTx.mode === 'DELIVERY' && addrParts.length
+    ? `\nEndereço:\n${addrParts.join(', ')}`
+    : '';
+
+  const amounts = calculateOrderAmounts(safeTx, conversation);
+  const lines = [
+    'Aqui está o resumo do seu pedido:',
+    '',
+    'Itens:',
+    items,
+    '',
+    `Modalidade: ${mode}${addressBlock}`,
+    `Pagamento: ${payment}`,
+    `Subtotal: ${formatBRL(amounts.itemTotal / 100)}`,
+  ];
+  if (amounts.feeCents > 0) lines.push(`Taxa de entrega: ${formatBRL(amounts.feeCents / 100)}`);
+  lines.push(`Total: ${formatBRL(amounts.total / 100)}`);
+  if (withConfirmation) lines.push('', 'Está tudo certo para confirmar?');
+  return lines.join('\n');
 }
 
 async function createSaiposOrder({ conversation, runtime, apiRequest, getEnvConfig, log }) {
@@ -1807,14 +1879,14 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
       if (first === 'items') {
         const hasItems = Array.isArray(tx?.items) && tx.items.length > 0;
         return hasItems
-          ? 'Entendido! Quer acrescentar, remover ou alterar algum item? Se estiver finalizado, me diga "somente isso".'
+          ? 'Entendi. Já registrei os itens atuais. Quer acrescentar, remover ou alterar algo? Se estiver finalizado, me diga "somente isso".'
           : 'Entendido! Para eu registrar certinho, pode informar os itens assim: "1 prato do dia e 1 coca-cola lata"?';
       }
-      if (first === 'address.street_name') return 'Entendido! Pode me passar a rua completa?';
+      if (first === 'address.street_name') return 'Entendi. Pode confirmar a rua completa para entrega?';
       if (first === 'address.street_number') return 'Entendido! E o número da casa?';
       if (first === 'address.neighborhood') return 'Entendido! Qual é o bairro?';
       if (first === 'payment') return 'Entendido! Qual forma de pagamento prefere?';
-      return 'Entendido! Continuando de onde paramos...';
+      return 'Entendido! Continuando de onde paramos.';
     }
     return fallbackText(runtime, 'ASK_MISSING_FIELDS', tx, missing, conversation);
   }
@@ -1853,24 +1925,7 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   }
 
   if (action === 'ORDER_REVIEW') {
-    const items = (tx.items || []).map((it) => {
-      const price = it.unit_price ? ` – ${formatBRL(it.unit_price / 100)}` : '';
-      return `• ${it.quantity}x ${it.name}${price}`;
-    }).join('\n') || '—';
-    const paymentMap = { PIX: 'PIX', CARD: 'Cartão', CASH: 'Dinheiro' };
-    const payment = paymentMap[tx.payment] || tx.payment || '—';
-    const mode = tx.mode === 'TAKEOUT' ? 'Retirada no local' : 'Entrega';
-    let addrLine = '';
-    if (tx.mode === 'DELIVERY' && cleanText(tx.address?.street_name)) {
-      const addrParts = [tx.address.street_name, tx.address.street_number, tx.address.neighborhood, tx.address.city].filter(Boolean);
-      addrLine = `\nEndereço: ${addrParts.join(', ')}`;
-    }
-    const feeInfo = tx.mode === 'DELIVERY' ? resolveDeliveryFee(conversation, tx) : null;
-    const feeCents = feeInfo ? Math.round(Number(feeInfo.fee || 0) * 100) : 0;
-    const feeLine = feeInfo ? `\n*Taxa de entrega:* ${formatBRL(feeInfo.fee)}` : '';
-    const total = (tx.items || []).reduce((sum, it) => sum + (Number(it.unit_price || 0) * Number(it.quantity || 1)), 0) + feeCents;
-    const totalLine = total > 0 ? `\n*Total: ${formatBRL(total / 100)}*` : '';
-    return `Aqui está o resumo do seu pedido 👇\n\n*Itens:*\n${items}\n\n*Modalidade:* ${mode}${addrLine}${feeLine}\n*Pagamento:* ${payment}${totalLine}\n\nEstá tudo certo? 😊`;
+    return generateOrderSummary(tx, conversation, { withConfirmation: true });
   }
 
   if (action === 'CREATE_ORDER_AND_WAIT_PAYMENT') {
@@ -1947,11 +2002,11 @@ function buildContextualAnswer(conversation, userMessage = '') {
   if (/\b(o que (eu )?pedi|meu pedido atual|resumo do pedido|que (tenho|tem) no pedido|o que (tenho|tem) no pedido|meu pedido)\b/i.test(text)) {
     const items = (conversation?.transaction?.items || []).filter((it) => cleanText(it.name));
     if (items.length > 0) {
-      const lines = items.map((it) => `• ${it.quantity}x ${it.name}`).join('\n');
+      const summary = generateOrderSummary(conversation.transaction, conversation, { withConfirmation: false });
       const followUp = conversation?.itemsPhaseComplete
         ? ''
         : '\n\nQuer acrescentar, remover ou alterar algum item? Se estiver finalizado, me diga "somente isso".';
-      return `Seu pedido até agora:\n${lines}${followUp}`;
+      return `${summary}${followUp}`;
     }
     return 'Ainda não registrei nenhum item no seu pedido.';
   }
@@ -1986,7 +2041,20 @@ function buildContextualAnswer(conversation, userMessage = '') {
         return cleanText([
           a.logradouro || a.street || a.street_name || '',
           a.numero || a.number || a.street_number || '',
+          a.complemento || a.complement || '',
           a.bairro || a.neighborhood || '',
+          a.cidade || a.city || '',
+          a.estado || a.state || '',
+          a.cep || a.postal_code || '',
+        ].filter(Boolean).join(', '));
+      }
+      if (company.address_raw && typeof company.address_raw === 'object') {
+        const a = company.address_raw;
+        return cleanText([
+          a.logradouro || a.street || a.street_name || '',
+          a.numero || a.number || a.street_number || '',
+          a.complemento || a.complement || '',
+          a.bairro || a.neighborhood || a.district || '',
           a.cidade || a.city || '',
           a.estado || a.state || '',
           a.cep || a.postal_code || '',
@@ -2011,6 +2079,19 @@ function buildContextualAnswer(conversation, userMessage = '') {
           if (row.open && row.close) parts.push(`${label[d]} ${row.open}-${row.close}`);
         }
         return cleanText(parts.join(' | '));
+      }
+      if (company.schedule_raw) {
+        if (typeof company.schedule_raw === 'string') return cleanText(company.schedule_raw);
+        if (Array.isArray(company.schedule_raw)) {
+          const parts = company.schedule_raw.map((row) => {
+            const day = cleanText(row?.day || row?.weekday || row?.dia || row?.name || '');
+            const open = cleanText(row?.open || row?.start || row?.from || row?.abertura || '');
+            const close = cleanText(row?.close || row?.end || row?.to || row?.fechamento || '');
+            if (!day || !open || !close) return '';
+            return `${day} ${open}-${close}`;
+          }).filter(Boolean);
+          return cleanText(parts.join(' | '));
+        }
       }
       return '';
     })();
@@ -2388,8 +2469,11 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     const inferred = inferItemsFromMenu(normalizedText, menuPool);
     const currentItems = Array.isArray(extracted.items) ? extracted.items : [];
     const hasJoinedItem = currentItems.some((i) => /\s+e\s+/.test(String(i?.name || '').toLowerCase()));
-    if (inferred.length && (inferred.length >= currentItems.length || hasJoinedItem)) {
-      extracted.items = inferred;
+    if (inferred.length) {
+      const keepCurrent = currentItems.filter((i) => !/\s+e\s+/.test(String(i?.name || '').toLowerCase()));
+      extracted.items = [...keepCurrent, ...inferred];
+    } else if (hasJoinedItem) {
+      extracted.items = currentItems.filter((i) => !/\s+e\s+/.test(String(i?.name || '').toLowerCase()));
     }
     forceFillPendingField({ conversation, runtime, groupedText: normalizedText, extracted });
     extracted.items = normalizeExtractedItemsWithCatalog(extracted.items || [], conversation.catalog || []);
@@ -2479,10 +2563,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
         conversation.state = STATES.COLLECTING_DATA;
         conversation.stateUpdatedAt = nowISO();
       } else if (runtime.orderProvider === 'anafood') {
-        const err = cleanText(order.error || '');
-        failText = err
-          ? `Não consegui enviar para o gestor de pedidos AnaFood agora (${err}). Pode tentar novamente em instantes?`
-          : 'Não consegui enviar para o gestor de pedidos AnaFood agora. Pode tentar novamente em instantes?';
+        failText = 'Estou com instabilidade para concluir o pedido agora. Pode tentar novamente em instantes?';
       }
       const sent = await sendWhatsAppMessage(conversation.phone, failText, runtime, conversation.remoteJid);
       if (sent && typeof onSend === 'function') {
@@ -2583,7 +2664,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
           else if (orchestratorResult.action === 'ANSWER_AND_RESUME_REPEAT') followAction = 'ASK_REPEAT_LAST_ORDER';
           else if (orchestratorResult.action === 'ANSWER_AND_CONFIRM') followAction = 'ASK_CONFIRMATION';
           const follow = fallbackText(runtime, followAction, conversation.transaction, orchestratorResult.missing || [], conversation);
-          return `${contextual} ${follow}`.trim();
+          return `${contextual}\n\n${follow}`.trim();
         }
       }
       if (deterministicActions.has(orchestratorResult.action)) {
@@ -2815,3 +2896,4 @@ module.exports = {
   STATES,
   INTENTS,
 };
+
