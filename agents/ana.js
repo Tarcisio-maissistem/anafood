@@ -791,6 +791,7 @@ async function extractorAgent({ runtime, groupedText }) {
     items: [],
     address: {},
   };
+  if (/\b(nao|não)\s+tem\s+num(?:ero)?\b/i.test(groupedText)) out.address.street_number = 'S/N';
 
   const nameMatch = groupedText.match(/(?:meu nome (?:é|e)|sou|chamo-me|me chamo)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]{2,60})/i);
   if (nameMatch) out.customer_name = cleanText(nameMatch[1]);
@@ -1200,18 +1201,18 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
     if (yes) return conversation.transaction.payment === 'PIX'
       ? { nextState: STATES.WAITING_PAYMENT, action: 'CREATE_ORDER_AND_WAIT_PAYMENT', missing: [] }
       : { nextState: STATES.CONFIRMED, action: 'CREATE_ORDER_AND_CONFIRM', missing: [] };
-    const hasOrderChange = Boolean(
-      (Array.isArray(extracted?.items) && extracted.items.length > 0)
-      || cleanText(extracted?.mode)
-      || cleanText(extracted?.payment)
-      || cleanText(extracted?.notes)
-    );
-    if (hasOrderChange) return { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
     if (/\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar)\b/i.test(groupedText)) {
       return { nextState: STATES.COLLECTING_DATA, action: 'REQUEST_ADJUSTMENTS', missing: [] };
     }
     // Consultation question while waiting confirmation: answer then re-ask
     if (i === INTENTS.CONSULTA || hasQuestion) return { nextState: STATES.WAITING_CONFIRMATION, action: 'ANSWER_AND_CONFIRM', missing: [] };
+    const hasOrderChange = Boolean(
+      (Array.isArray(extracted?.items) && extracted.items.length > 0)
+      || (cleanText(extracted?.mode) && cleanText(extracted.mode) !== cleanText(conversation.transaction?.mode))
+      || (cleanText(extracted?.payment) && cleanText(extracted.payment) !== cleanText(conversation.transaction?.payment))
+      || (cleanText(extracted?.notes) && cleanText(extracted.notes) !== cleanText(conversation.transaction?.notes))
+    );
+    if (hasOrderChange) return { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
     return { nextState: STATES.WAITING_CONFIRMATION, action: 'ASK_CONFIRMATION', missing: [] };
   }
 
@@ -1640,11 +1641,21 @@ function resolveDeliveryFee(conversation, tx) {
       best = area;
     }
   }
+  if (!best) {
+    if (deliveryAreas.length === 1) best = deliveryAreas[0];
+  }
+  if (!best) {
+    const generic = deliveryAreas.find((a) => {
+      const n = normalizeForMatch(a?.neighborhood || a?.bairro || a?.zone_name || a?.name || '');
+      return /\b(geral|padrao|padrão|todos|todas|qualquer|toda cidade|cidade inteira|entrega)\b/.test(n);
+    });
+    if (generic) best = generic;
+  }
   if (!best) return null;
   const fee = toReaisAmount(best?.fee ?? best?.taxa ?? best?.delivery_fee ?? 0);
   if (fee <= 0) return null;
   return {
-    neighborhood: cleanText(best?.neighborhood || best?.bairro || best?.name || ''),
+    neighborhood: cleanText(best?.neighborhood || best?.bairro || best?.zone_name || best?.name || ''),
     fee,
   };
 }
@@ -1937,8 +1948,8 @@ function buildContextualAnswer(conversation, userMessage = '') {
     const bairroMatch = text.match(/bairro\s+([a-z0-9\s]+)/i);
     if (bairroMatch && deliveryAreas.length) {
       const asked = normalizeForMatch(bairroMatch[1]);
-      const found = deliveryAreas.find((a) => normalizeForMatch(a.neighborhood).includes(asked) || asked.includes(normalizeForMatch(a.neighborhood)));
-      if (found) return `A taxa para ${found.neighborhood} é ${formatBRL(toReaisAmount(found?.fee ?? found?.taxa ?? found?.delivery_fee ?? 0))}.`;
+      const found = deliveryAreas.find((a) => normalizeForMatch(a.neighborhood || a?.zone_name || '').includes(asked) || asked.includes(normalizeForMatch(a.neighborhood || a?.zone_name || '')));
+      if (found) return `A taxa para ${found.neighborhood || found.zone_name || 'essa região'} é ${formatBRL(toReaisAmount(found?.fee ?? found?.taxa ?? found?.delivery_fee ?? 0))}.`;
     }
     if (/\b(taxa|entrega|delivery)\b/.test(text)) {
       const feeInfo = resolveDeliveryFee(conversation, conversation?.transaction || {});
@@ -1947,7 +1958,7 @@ function buildContextualAnswer(conversation, userMessage = '') {
     if (deliveryAreas.length) {
       const sample = deliveryAreas
         .slice(0, 5)
-        .map((a) => `${a.neighborhood} (${formatBRL(toReaisAmount(a?.fee ?? a?.taxa ?? a?.delivery_fee ?? 0))})`)
+        .map((a) => `${a.neighborhood || a.zone_name || 'Região'} (${formatBRL(toReaisAmount(a?.fee ?? a?.taxa ?? a?.delivery_fee ?? 0))})`)
         .join(', ');
       return `Entregamos em: ${sample}.`;
     }
