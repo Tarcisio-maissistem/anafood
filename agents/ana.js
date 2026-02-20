@@ -75,7 +75,7 @@ const detectNo = (t) => {
 const detectItemsPhaseDone = (t) => {
   const x = normalizeForMatch(t);
   if (!x) return false;
-  return /\b(so isso|somente isso|apenas isso|e isso|isso mesmo|pode fechar|fechar pedido|fechar|nada mais|nao quero mais|nao quero adicionar mais|nao quero acrescentar mais|pedido completo)\b/.test(x);
+  return /\b(so isso|somente isso|apenas isso|e isso|isso mesmo|pode fechar|fechar pedido|fechar|nada mais|pedido completo)\b/.test(x);
 };
 const formatBRL = (n) => {
   const v = Number(n || 0);
@@ -87,6 +87,14 @@ const normalizeForMatch = (v) => String(v || '')
   .replace(/[\u0300-\u036f]/g, '')
   .toLowerCase()
   .replace(/[^a-z0-9\s]/g, ' ')
+  .replace(/\b(\d+)\s*lt\b/g, '$1l')
+  .replace(/\b(\d+)\s*lts\b/g, '$1l')
+  .replace(/\brefri\b/g, 'refrigerante')
+  .replace(/\brefri\s+2l\b/g, 'refrigerante 2l')
+  .replace(/\bcoca\s+lata\b/g, 'coca cola lata')
+  .replace(/\bvalca\b/g, 'valsa')
+  .replace(/\bvalsaa\b/g, 'valsa')
+  .replace(/\bvalsa\b/g, 'valsa')
   .replace(/\s+/g, ' ')
   .trim();
 const tokenizeNormalized = (v) => normalizeForMatch(v).split(' ').filter(Boolean);
@@ -102,6 +110,40 @@ const singularizeToken = (token) => {
   return t;
 };
 const canonicalTokens = (v) => tokenizeNormalized(v).map(singularizeToken).filter(Boolean);
+
+function levenshtein(a, b) {
+  const s = String(a || '');
+  const t = String(b || '');
+  const m = s.length;
+  const n = t.length;
+  if (!m) return n;
+  if (!n) return m;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return dp[m][n];
+}
+
+function isNearToken(a, b) {
+  const x = String(a || '');
+  const y = String(b || '');
+  if (!x || !y) return false;
+  if (x === y) return true;
+  if (Math.abs(x.length - y.length) > 1) return false;
+  const dist = levenshtein(x, y);
+  const maxDist = Math.max(1, Math.floor(Math.min(x.length, y.length) / 5));
+  return dist <= maxDist;
+}
 
 function normalizePaymentLabel(value) {
   const x = normalizeForMatch(value);
@@ -535,8 +577,14 @@ function inferItemsFromMenu(message, menuRows) {
       if (!name) continue;
       const chunkInName = name.includes(chunk);
       const nameInChunk = chunk.includes(name);
-      if (!chunkInName && !nameInChunk) continue;
-      const score = Math.min(name.length, chunk.length);
+      const chunkTokens = tokenizeNormalized(chunk);
+      const nameTokens = tokenizeNormalized(name);
+      const fuzzyOverlap = nameTokens.filter((t) => chunkTokens.some((ct) => isNearToken(t, ct))).length;
+      const fuzzyRatio = fuzzyOverlap / Math.max(nameTokens.length, chunkTokens.length, 1);
+      if (!chunkInName && !nameInChunk && fuzzyRatio < 0.6) continue;
+      const score = chunkInName || nameInChunk
+        ? Math.min(name.length, chunk.length)
+        : Math.round(fuzzyRatio * 100);
       if (score > bestScore) {
         bestScore = score;
         best = item;
@@ -1014,6 +1062,15 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
   }
 
   if (s === STATES.COLLECTING_DATA) {
+    const explicitCancel = /\b(cancela|cancelar|deixa quieto|desisti|desisto|aborta|encerrar pedido)\b/i.test(groupedText);
+    if (explicitCancel) {
+      conversation.transaction = { mode: '', customer_name: '', items: [], notes: '', address: { street_name: '', street_number: '', neighborhood: '', city: '', state: '', postal_code: '' }, payment: '', total_amount: 0, order_id: null };
+      conversation.confirmed = {};
+      conversation.pendingFieldConfirmation = null;
+      conversation.upsellDone = false;
+      conversation.itemsPhaseComplete = false;
+      return { nextState: STATES.INIT, action: 'FLOW_CANCELLED', missing: [] };
+    }
     if (i === INTENTS.CANCELAMENTO) {
       conversation.transaction = { mode: '', customer_name: '', items: [], notes: '', address: { street_name: '', street_number: '', neighborhood: '', city: '', state: '', postal_code: '' }, payment: '', total_amount: 0, order_id: null };
       conversation.confirmed = {};
@@ -1021,6 +1078,12 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
       conversation.upsellDone = false;
       conversation.itemsPhaseComplete = false;
       return { nextState: STATES.INIT, action: 'FLOW_CANCELLED', missing: [] };
+    }
+    if (conversation.pendingFieldConfirmation) {
+      const field = conversation.pendingFieldConfirmation;
+      if (field === 'items' && Array.isArray(extracted?.items) && extracted.items.length) {
+        conversation.pendingFieldConfirmation = null;
+      }
     }
     if (conversation.pendingFieldConfirmation) {
       const field = conversation.pendingFieldConfirmation;
@@ -1068,7 +1131,10 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
         : firstMissing.startsWith('address.')
           ? Boolean(cleanText(conversation.transaction.address?.[firstMissing.slice('address.'.length)]))
           : Boolean(cleanText(conversation.transaction[firstMissing]));
-      if (hasValueForField) conversation.pendingFieldConfirmation = firstMissing;
+      if (firstMissing !== 'items' && hasValueForField) conversation.pendingFieldConfirmation = firstMissing;
+    }
+    if (conversation.pendingFieldConfirmation === 'items') {
+      conversation.pendingFieldConfirmation = null;
     }
     if (conversation.pendingFieldConfirmation) {
       return {
@@ -1225,8 +1291,10 @@ function resolveItemsWithCatalog(items, catalog) {
         const ratio = overlap / Math.max(item.tokens.length, targetTokens.length, 1);
         const canonicalOverlap = item.canonical.filter((t) => targetCanonicalSet.has(t)).length;
         const canonicalRatio = canonicalOverlap / Math.max(item.canonical.length, targetCanonical.length, 1);
-        const bestRatio = Math.max(ratio, canonicalRatio);
-        if (bestRatio >= 0.6) score = 500 + Math.round(bestRatio * 120);
+        const fuzzyOverlap = item.tokens.filter((t) => targetTokens.some((tt) => isNearToken(t, tt))).length;
+        const fuzzyRatio = fuzzyOverlap / Math.max(item.tokens.length, targetTokens.length, 1);
+        const bestRatio = Math.max(ratio, canonicalRatio, fuzzyRatio);
+        if (bestRatio >= 0.6) score = 500 + Math.round(bestRatio * 130);
       }
       if (score > bestScore) {
         bestScore = score;
