@@ -3,12 +3,14 @@
   "tenants": [
     {
       "id": "anafood",
-      "name": "Ana Food",
-      "subdomain": "anafood",
+      "name": "Mais Sistem Automação Comercial",
+      "subdomain": "maissistem",
       "active": true,
       "environment": "production",
       "business": {
         "segment": "restaurant",
+        "companyId": "d09a06e5-9c4b-480a-b7d0-11b3ca943039",
+        "companyCnpj": "27.644.092/0001-07",
         "restaurant": {
           "requireAddress": true,
           "orderProvider": "saipos",
@@ -43,14 +45,16 @@
         "supabase": {
           "url": "${SUPABASE_URL}",
           "serviceRoleKey": "${SUPABASE_SERVICE_ROLE_KEY}",
-          "companyId": "",
+          "companyId": "d09a06e5-9c4b-480a-b7d0-11b3ca943039",
+          "companyCnpj": "27.644.092/0001-07",
+          "subdomain": "maissistem",
           "companyTable": "companies",
           "companyLookupKey": "id",
           "menuTable": "products",
           "paymentTable": "payment_methods",
           "deliveryTable": "delivery_fees",
           "tenantFilterKey": "company_id",
-          "filterValue": ""
+          "filterValue": "d09a06e5-9c4b-480a-b7d0-11b3ca943039"
         },
         "anafood": {
           "endpoint": "${ANAFOOD_API_URL}",
