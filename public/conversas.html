@@ -153,6 +153,22 @@
     .msg.user .bubble      { background: var(--wa-bubble-in); border-top-left-radius: 0; }
     .msg.assistant .bubble { background: var(--wa-bubble-out); border-top-right-radius: 0; }
     .at { position: absolute; right: 7px; bottom: 3px; font-size: 11px; color: #8696a0; }
+    .bubble .msg-text { white-space: pre-wrap; word-break: break-word; }
+    .msg-media { display: block; max-width: 320px; border-radius: 8px; overflow: hidden; margin-bottom: 4px; }
+    .msg-media img, .msg-media video { display: block; width: 100%; height: auto; border-radius: 8px; background: #f2f4f5; }
+    .msg-audio { width: 100%; min-width: 220px; margin: 2px 0 4px; }
+    .msg-doc {
+      display: flex; align-items: center; gap: 10px;
+      background: rgba(17,27,33,.06); border-radius: 8px; padding: 10px; margin-bottom: 4px;
+      min-width: 220px;
+    }
+    .msg-doc-ico {
+      width: 36px; height: 36px; border-radius: 6px; background: #f04f3f; color: #fff;
+      display: grid; place-items: center; font-size: 10px; font-weight: 700; flex: 0 0 auto;
+    }
+    .msg-doc-meta { min-width: 0; }
+    .msg-doc-name { font-size: 13px; font-weight: 600; color: #1f2c34; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .msg-doc-sub { font-size: 11px; color: #667781; margin-top: 1px; }
 
     /* ── Media / audio preview bar ── */
     .preview-bar {
@@ -162,6 +178,9 @@
     }
     .preview-bar .preview-thumb {
       width: 56px; height: 56px; object-fit: cover; border-radius: 8px; flex-shrink: 0;
+    }
+    .preview-bar .preview-frame {
+      width: 88px; height: 56px; border: none; border-radius: 8px; background: #fff; display: none; flex-shrink: 0;
     }
     .preview-bar .preview-label { flex: 1; font-size: 13px; color: #54656f; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .preview-bar .preview-actions { display: flex; gap: 6px; flex-shrink: 0; }
@@ -484,6 +503,7 @@
     <!-- Image preview bar (shown when image selected, before send) -->
     <div id="mediaPreviewBar" class="preview-bar" style="display:none">
       <img id="mediaPreviewImg" class="preview-thumb" src="" alt="preview" />
+      <iframe id="mediaPreviewFrame" class="preview-frame" title="preview-pdf"></iframe>
       <span id="mediaPreviewName" class="preview-label"></span>
       <div class="preview-actions">
         <button id="cancelMediaBtn" class="btn">✖ Cancelar</button>

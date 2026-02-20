@@ -61,6 +61,7 @@ const cleanText = (t) => String(t || '').replace(/\s+/g, ' ').trim();
 const toNumberOrOne = (v) => { const n = parseInt(String(v || '').trim(), 10); return Number.isFinite(n) && n > 0 ? n : 1; };
 const detectYes = (t) => {
   const x = cleanText(t).toLowerCase();
+  if (/^sim\b/.test(x) || /\btudo\s*certo\b/.test(x) || /\best[aá]\s*certo\b/.test(x)) return true;
   if (/^(sim|ok|isso|certo|confirmo|confirmar|fechado|claro|pode|bora|vai|positivo|afirmativo|quero|desejo|pode ser|com certeza|perfeito|exato|exatamente|correto|isso mesmo|tá bom|ta bom|tudo certo|manda|manda sim|quero sim|pode mandar|fechou|topo|combinado|beleza)$/.test(x)) return true;
   if (x.includes('confirm') || x.includes('quero sim') || x.includes('pode sim') || x.includes('claro que sim')) return true;
   return false;
@@ -625,7 +626,7 @@ async function extractorAgent({ runtime, groupedText }) {
   const lower = groupedText.toLowerCase();
   const out = {
     mode: /retirada|retirar|balcao/.test(lower) ? 'TAKEOUT' : (/entrega|delivery/.test(lower) ? 'DELIVERY' : null),
-    payment: /pix/.test(lower) ? 'PIX'
+    payment: /(pix|piz|piks|piquis)\b/.test(lower) ? 'PIX'
       : (/(cartao|cartão|cr[eé]dito|d[eé]bito)/.test(lower) ? 'CARD'
       : (/dinheiro|especie|espécie|cash|nota/.test(lower) ? 'CASH' : null)),
     customer_name: null,
@@ -682,7 +683,8 @@ function mergeRestaurantTransaction(conv, extracted) {
       const existing = conv.transaction.items.find((i) => i.name.toLowerCase() === name.toLowerCase());
       if (existing) {
         const before = Number(existing.quantity || 0);
-        existing.quantity += toNumberOrOne(item.quantity);
+        if (item.absolute) existing.quantity = toNumberOrOne(item.quantity);
+        else existing.quantity += toNumberOrOne(item.quantity);
         if (Number(existing.quantity || 0) !== before) changed = true;
         // Preenche código e preço se ainda estavam vazios (item normalizado com catálogo)
         if (!existing.integration_code && item.integration_code) existing.integration_code = String(item.integration_code);
@@ -1016,6 +1018,11 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
   if (s === STATES.WAITING_PAYMENT) {
     if (i === INTENTS.PAGAMENTO || yes || /paguei|comprovante|pago/.test(groupedText.toLowerCase())) return { nextState: STATES.CONFIRMED, action: 'PAYMENT_CONFIRMED', missing: [] };
     if (i === INTENTS.CANCELAMENTO) return { nextState: STATES.COLLECTING_DATA, action: 'REQUEST_ADJUSTMENTS', missing: [] };
+    if (/retirad|no local|na hora|dinheiro|cart[aã]o|cartao|cr[eé]dito|d[eé]bito/.test(groupedText.toLowerCase())) {
+      if (/dinheiro|na hora/.test(groupedText.toLowerCase())) conversation.transaction.payment = 'CASH';
+      else if (/cart[aã]o|cartao|cr[eé]dito|d[eé]bito/.test(groupedText.toLowerCase())) conversation.transaction.payment = 'CARD';
+      return { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
+    }
     return { nextState: STATES.WAITING_PAYMENT, action: 'PAYMENT_REMINDER', missing: [] };
   }
 
@@ -1990,6 +1997,11 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     }
     forceFillPendingField({ conversation, runtime, groupedText: normalizedText, extracted });
     extracted.items = normalizeExtractedItemsWithCatalog(extracted.items || [], conversation.catalog || []);
+    const textLower = String(normalizedText || '').toLowerCase();
+    const hasAbsoluteHint = /\b(no total|total de|corrig|ajust|alter|troca|est[aá]\s*errad|quero\s+\d+)/i.test(textLower);
+    if (hasAbsoluteHint && Array.isArray(extracted.items) && extracted.items.length) {
+      extracted.items = extracted.items.map((it) => ({ ...it, absolute: true }));
+    }
     // Remove unresolved duplicates: if an item with integration_code exists, drop similar items without code
     {
       const withCode = extracted.items.filter((it) => cleanText(it.integration_code));
@@ -2061,6 +2073,9 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     const order = await createOrderByProviderIfNeeded({ conversation, runtime, apiRequest, getEnvConfig, log });
     if (!order.ok) {
       conversation.consecutiveFailures = (conversation.consecutiveFailures || 0) + 1;
+      // Evita estado fantasma em WAITING_PAYMENT quando falha ao criar pedido
+      conversation.state = STATES.WAITING_CONFIRMATION;
+      conversation.stateUpdatedAt = nowISO();
       let failText = 'Tive um problema ao registrar o pedido no sistema.';
       if (Array.isArray(order.unresolved) && order.unresolved.length) {
         failText = `Não encontrei esses itens no cardápio: ${order.unresolved.join(', ')}. Pode informar exatamente como aparece no cardápio?`;

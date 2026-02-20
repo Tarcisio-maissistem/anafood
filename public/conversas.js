@@ -29,6 +29,7 @@
     recordIcon:          document.getElementById('recordIcon'),
     mediaPreviewBar:     document.getElementById('mediaPreviewBar'),
     mediaPreviewImg:     document.getElementById('mediaPreviewImg'),
+    mediaPreviewFrame:   document.getElementById('mediaPreviewFrame'),
     mediaPreviewName:    document.getElementById('mediaPreviewName'),
     cancelMediaBtn:      document.getElementById('cancelMediaBtn'),
     confirmMediaBtn:     document.getElementById('confirmMediaBtn'),
@@ -168,16 +169,54 @@
     if (!Array.isArray(msgs) || !msgs.length) return 'empty';
     const last = msgs[msgs.length - 1] || {};
     const first = msgs[0] || {};
-    return `${msgs.length}|${first.at || ''}|${last.at || ''}|${String(last.content || '').slice(0, 60)}`;
+    const mediaKey = `${last?.media?.type || ''}|${last?.media?.url || ''}|${last?.media?.fileName || ''}`;
+    return `${msgs.length}|${first.at || ''}|${last.at || ''}|${String(last.content || '').slice(0, 60)}|${mediaKey}`;
   }
 
   /* ── Build single message bubble ── */
+  function buildMediaHtml(media) {
+    if (!media || !media.type) return '';
+    const type = String(media.type);
+    const url = String(media.url || '').trim();
+    const thumb = String(media.thumbnailUrl || '').trim();
+    const caption = String(media.caption || '').trim();
+    const fileName = String(media.fileName || '').trim();
+    const mime = String(media.mimeType || '').trim();
+
+    if (type === 'image') {
+      const src = url || thumb;
+      if (src) {
+        return `<a class="msg-media" target="_blank" rel="noopener noreferrer" href="${escapeHtml(src)}"><img src="${escapeHtml(src)}" alt="imagem" loading="lazy" /></a>${caption ? `<div class="msg-text">${escapeHtml(caption)}</div>` : ''}`;
+      }
+      return `<div class="msg-doc"><div class="msg-doc-ico">IMG</div><div class="msg-doc-meta"><div class="msg-doc-name">Imagem</div></div></div>`;
+    }
+    if (type === 'video') {
+      if (url) {
+        return `<div class="msg-media"><video controls preload="metadata" src="${escapeHtml(url)}"></video></div>${caption ? `<div class="msg-text">${escapeHtml(caption)}</div>` : ''}`;
+      }
+      return `<div class="msg-doc"><div class="msg-doc-ico">VID</div><div class="msg-doc-meta"><div class="msg-doc-name">Vídeo</div></div></div>`;
+    }
+    if (type === 'audio') {
+      if (url) return `<audio class="msg-audio" controls preload="metadata" src="${escapeHtml(url)}"></audio>`;
+      return `<div class="msg-doc"><div class="msg-doc-ico">AUD</div><div class="msg-doc-meta"><div class="msg-doc-name">Áudio</div></div></div>`;
+    }
+    if (type === 'document') {
+      const isPdf = /pdf/i.test(mime) || /\.pdf$/i.test(fileName);
+      const sub = isPdf ? 'PDF' : (mime || 'Documento');
+      const link = url ? `<a target="_blank" rel="noopener noreferrer" href="${escapeHtml(url)}">` : '';
+      const close = url ? '</a>' : '';
+      return `${link}<div class="msg-doc"><div class="msg-doc-ico">${isPdf ? 'PDF' : 'DOC'}</div><div class="msg-doc-meta"><div class="msg-doc-name">${escapeHtml(fileName || 'Documento')}</div><div class="msg-doc-sub">${escapeHtml(sub)}</div></div></div>${close}`;
+    }
+    return '';
+  }
+
   function buildMsgNode(message) {
     const role = message.role === 'assistant' ? 'assistant' : 'user';
     const safeText = escapeHtml(message.content || '');
+    const mediaHtml = buildMediaHtml(message.media || null);
     const node = document.createElement('div');
     node.className = `msg ${role}`;
-    node.innerHTML = `<div class="bubble">${safeText}<div class="at">${escapeHtml(formatBubbleTime(message.at))}</div></div>`;
+    node.innerHTML = `<div class="bubble">${mediaHtml}${safeText ? `<div class="msg-text">${safeText}</div>` : ''}<div class="at">${escapeHtml(formatBubbleTime(message.at))}</div></div>`;
     return node;
   }
 
@@ -654,12 +693,23 @@
       // Body
       const body = document.createElement('div');
       body.className = 'conv-body';
+      const lastPreview = (() => {
+        const lm = conv?.lastMessage || {};
+        const text = String(lm.content || '').trim();
+        if (text) return text;
+        const mt = String(lm?.media?.type || '').toLowerCase();
+        if (mt === 'image') return '[imagem]';
+        if (mt === 'video') return '[vídeo]';
+        if (mt === 'audio') return '[áudio]';
+        if (mt === 'document') return '[documento]';
+        return '';
+      })();
       body.innerHTML = `
         <div class="conv-row">
           <div class="conv-name">${escapeHtml(displayName(conv))}</div>
           <div class="conv-time">${escapeHtml(formatListDate(conv.lastActivityAt))}</div>
         </div>
-        <div class="conv-preview">${escapeHtml((conv?.lastMessage?.content || '').slice(0, 100))}</div>
+        <div class="conv-preview">${escapeHtml(lastPreview.slice(0, 100))}</div>
       `;
 
       item.appendChild(avEl);
@@ -820,13 +870,18 @@
       const file = ui.fileInput.files?.[0];
       if (!file) return;
       ui.fileInput.value = '';
-      if (state.fileMode === 'image' && file.type.startsWith('image/')) {
+      const isImage = file.type.startsWith('image/');
+      const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+      if ((state.fileMode === 'image' && isImage) || (state.fileMode === 'document' && isPdf)) {
         state.pendingMediaFile = file;
         const objUrl = URL.createObjectURL(file);
-        ui.mediaPreviewImg.src = objUrl;
+        ui.mediaPreviewImg.style.display = isImage ? 'block' : 'none';
+        ui.mediaPreviewFrame.style.display = isPdf ? 'block' : 'none';
+        ui.mediaPreviewImg.src = isImage ? objUrl : '';
+        ui.mediaPreviewFrame.src = isPdf ? objUrl : '';
         ui.mediaPreviewName.textContent = file.name;
         ui.mediaPreviewBar.style.display = 'flex';
-        setStatus('Imagem selecionada. Confirme para enviar.', 'ok');
+        setStatus(isPdf ? 'PDF selecionado. Confirme para enviar.' : 'Imagem selecionada. Confirme para enviar.', 'ok');
       } else {
         sendFile(file).catch(e => setStatus(e.message, 'err'));
       }
@@ -836,6 +891,9 @@
     ui.cancelMediaBtn.onclick = () => {
       state.pendingMediaFile = null;
       ui.mediaPreviewImg.src = '';
+      ui.mediaPreviewFrame.src = '';
+      ui.mediaPreviewFrame.style.display = 'none';
+      ui.mediaPreviewImg.style.display = 'block';
       ui.mediaPreviewBar.style.display = 'none';
       setStatus('Envio cancelado.', '');
     };
@@ -843,8 +901,9 @@
       const file = state.pendingMediaFile;
       if (!file) return;
       state.pendingMediaFile = null;
+      const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
       ui.mediaPreviewBar.style.display = 'none';
-      sendFile(file, 'image').catch(e => setStatus(e.message, 'err'));
+      sendFile(file, isPdf ? 'document' : 'image').catch(e => setStatus(e.message, 'err'));
     };
 
     /* Preview de áudio */

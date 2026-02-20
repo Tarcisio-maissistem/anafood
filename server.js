@@ -458,8 +458,8 @@ const extractRemoteJidFromChat = (chat) => {
 };
 
 const extractTextFromAnyMessage = (msg) => {
-    const m = msg?.message || msg?.data?.message || msg || {};
-    return (
+  const m = msg?.message || msg?.data?.message || msg || {};
+  return (
         m?.conversation ||
         m?.extendedTextMessage?.text ||
         m?.imageMessage?.caption ||
@@ -472,6 +472,71 @@ const extractTextFromAnyMessage = (msg) => {
         msg?.text ||
         ''
     );
+};
+
+const extractMediaFromAnyMessage = (msg) => {
+    const m = msg?.message || msg?.data?.message || msg || {};
+    const image = m?.imageMessage || msg?.imageMessage || null;
+    const video = m?.videoMessage || msg?.videoMessage || null;
+    const audio = m?.audioMessage || m?.pttMessage || m?.voiceMessage || msg?.audioMessage || msg?.pttMessage || null;
+    const document = m?.documentMessage || msg?.documentMessage || null;
+
+    const pickUrl = (x) => String(
+        x?.url || x?.directPath || x?.mediaUrl || x?.downloadUrl || x?.fileUrl || x?.link || ''
+    ).trim();
+
+    if (image) {
+        return {
+            type: 'image',
+            mimeType: String(image?.mimetype || 'image/jpeg'),
+            url: pickUrl(image),
+            thumbnailUrl: String(image?.jpegThumbnail || '').trim(),
+            fileName: String(image?.fileName || image?.filename || ''),
+            caption: String(image?.caption || ''),
+        };
+    }
+    if (video) {
+        return {
+            type: 'video',
+            mimeType: String(video?.mimetype || 'video/mp4'),
+            url: pickUrl(video),
+            thumbnailUrl: String(video?.jpegThumbnail || '').trim(),
+            fileName: String(video?.fileName || video?.filename || ''),
+            caption: String(video?.caption || ''),
+        };
+    }
+    if (audio) {
+        return {
+            type: 'audio',
+            mimeType: String(audio?.mimetype || 'audio/ogg'),
+            url: pickUrl(audio),
+            fileName: String(audio?.fileName || audio?.filename || ''),
+            ptt: Boolean(audio?.ptt || m?.pttMessage),
+            duration: Number(audio?.seconds || audio?.duration || 0) || null,
+        };
+    }
+    if (document) {
+        return {
+            type: 'document',
+            mimeType: String(document?.mimetype || 'application/octet-stream'),
+            url: pickUrl(document),
+            fileName: String(document?.fileName || document?.filename || ''),
+            caption: String(document?.caption || ''),
+            pageCount: Number(document?.pageCount || 0) || null,
+            fileLength: Number(document?.fileLength || 0) || null,
+            thumbnailUrl: String(document?.jpegThumbnail || '').trim(),
+        };
+    }
+    return null;
+};
+
+const fallbackTextForMedia = (media) => {
+    if (!media) return '';
+    if (media.type === 'image') return '[imagem]';
+    if (media.type === 'video') return '[vídeo]';
+    if (media.type === 'audio') return media.ptt ? '[áudio]' : '[áudio]';
+    if (media.type === 'document') return `[documento] ${media.fileName || ''}`.trim();
+    return '[mídia]';
 };
 
 const fetchEvolutionChats = async ({ apiUrl, apiKey, instance, limit = 50 }) => {
@@ -502,7 +567,8 @@ const fetchEvolutionChats = async ({ apiUrl, apiKey, instance, limit = 50 }) => 
             return chats.slice(0, limit).map((chat) => {
                 const remoteJid = extractRemoteJidFromChat(chat);
                 const phone = normalizeCanonicalPhone(String(remoteJid).split('@')[0] || '');
-                const lastMessageText = extractTextFromAnyMessage(chat?.lastMessage || chat?.message || chat);
+                const media = extractMediaFromAnyMessage(chat?.lastMessage || chat?.message || chat);
+                const lastMessageText = extractTextFromAnyMessage(chat?.lastMessage || chat?.message || chat) || fallbackTextForMedia(media);
                 const ts = chat?.conversationTimestamp || chat?.timestamp || chat?.t || chat?.lastMessageTimestamp || null;
                 const at = ts ? new Date(Number(ts) > 9999999999 ? Number(ts) : Number(ts) * 1000).toISOString() : null;
                 const name =
@@ -528,7 +594,7 @@ const fetchEvolutionChats = async ({ apiUrl, apiKey, instance, limit = 50 }) => 
                     remoteJid: remoteJid || (phone ? `${phone}@s.whatsapp.net` : ''),
                     name: String(name || '').trim(),
                     avatarUrl: String(avatarUrl || '').trim(),
-                    lastMessage: { role: 'user', content: String(lastMessageText || '').slice(0, 280), at },
+                    lastMessage: { role: 'user', content: String(lastMessageText || '').slice(0, 280), at, media },
                     lastActivityAt: at,
                 };
             }).filter((c) => isLikelyPhoneDigits(c.phone));
@@ -569,14 +635,16 @@ const fetchEvolutionMessages = async ({ apiUrl, apiKey, instance, remoteJid, lim
                 const key = row?.key || row?.data?.key || {};
                 const fromMe = Boolean(key?.fromMe ?? row?.fromMe ?? false);
                 const text = extractTextFromAnyMessage(row);
+                const media = extractMediaFromAnyMessage(row);
                 const ts = row?.messageTimestamp || row?.timestamp || row?.data?.messageTimestamp || null;
                 const at = ts ? new Date(Number(ts) > 9999999999 ? Number(ts) : Number(ts) * 1000).toISOString() : null;
                 return {
                     role: fromMe ? 'assistant' : 'user',
-                    content: String(text || '').slice(0, 2000),
+                    content: String(text || fallbackTextForMedia(media) || '').slice(0, 2000),
                     at,
+                    media,
                 };
-            }).filter((m) => m.content);
+            }).filter((m) => m.content || m.media);
 
             return mapped.slice(-limit);
         } catch (_) {
@@ -1456,6 +1524,7 @@ app.get('/api/ana/messages', (req, res) => {
                 role: m.role || 'user',
                 content: String(m.content || ''),
                 at: m.at || null,
+                media: m?.metadata?.media || null,
             }))
             : [];
 
@@ -1486,11 +1555,12 @@ app.get('/api/ana/messages', (req, res) => {
         const dedupKey = (m) => {
             const minuteTs = m.at ? new Date(m.at).toISOString().slice(0, 16) : '';
             const snippet = String(m.content || '').trim().slice(0, 80).toLowerCase().replace(/\s+/g, ' ');
-            return `${m.role || 'user'}|${minuteTs}|${snippet}`;
+            const mediaKey = `${m?.media?.type || ''}|${m?.media?.url || ''}|${m?.media?.fileName || ''}`;
+            return `${m.role || 'user'}|${minuteTs}|${snippet}|${mediaKey}`;
         };
         const seen = new Set();
         const allMessages = [...supabaseMessages, ...evolutionMessages, ...localMessages]
-            .filter((m) => m && String(m.content || '').trim())
+            .filter((m) => m && (String(m.content || '').trim() || m.media))
             .sort((a, b) => new Date(a.at || 0).getTime() - new Date(b.at || 0).getTime())
             .filter((m) => {
                 const k = dedupKey(m);
@@ -1638,7 +1708,15 @@ app.post('/api/ana/send', async (req, res) => {
                 role: 'assistant',
                 content: mediaBase64 ? `[${mediaLabel}] ${caption || fileName || mimeType || 'arquivo'}` : text,
                 at: new Date().toISOString(),
-                metadata: { manual: true },
+                metadata: {
+                    manual: true,
+                    media: mediaBase64 ? {
+                        type: mediaKind || resolveMediaType(mimeType, fileName, mediaKind),
+                        mimeType: mimeType || '',
+                        fileName: fileName || '',
+                        caption: caption || '',
+                    } : null,
+                },
             });
             session.lastActivityAt = new Date().toISOString();
         }
