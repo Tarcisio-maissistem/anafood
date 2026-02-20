@@ -262,7 +262,7 @@
   async function loadConversations() {
     const search = encodeURIComponent((ui.searchInput.value || '').trim());
     const data = await fetchJson(
-      `/api/ana/conversations?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&limit=120&search=${search}`
+      `/api/ana/conversations?tenant_id=${encodeURIComponent(state.tenantId)}&instance=${encodeURIComponent(state.instance)}&limit=200&search=${search}`
     );
     if (data.instance && data.instance !== state.instance) {
       state.instance = data.instance;
@@ -862,7 +862,7 @@
             .finally(() => { state.pollListBusy = false; });
         }
         pollSelectedMessages();
-      }, 3000);
+      }, 2000);
     } catch (err) {
       setStatus(`Erro ao iniciar: ${err.message}`, 'err');
     }

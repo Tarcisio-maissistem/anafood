@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { OpenAI } = require('openai');
 const { loadCompanyData } = require('../lib/company-data-mcp');
+const { saveInboundMessage } = require('../lib/supabase-messages');
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 const BUFFER_WINDOW_MS = Number(process.env.MESSAGE_BUFFER_MS || 1000);
@@ -2112,6 +2113,17 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
         transcription: normalized.transcription,
       });
       await runPipeline({ conversation, customer, groupedText, normalized, runtime, apiRequest, getEnvConfig, log, onSend });
+      // Fire-and-forget: persist mensagem do usuário no Supabase msg_history
+      saveInboundMessage({
+        supabaseUrl:    String(runtime.supabase?.url || '').trim(),
+        serviceRoleKey: String(runtime.supabase?.serviceRoleKey || '').trim(),
+        companyId:      String(conversation.companyData?.meta?.companyId || runtime.supabase?.filterValue || '').trim(),
+        tenantId:       runtime.id,
+        phone:          conversation.phone,
+        content:        normalized.normalizedText || groupedText,
+        at:             new Date().toISOString(),
+        contactName:    String(conversation.contactName || customer.name || '').trim(),
+      });
     } catch (err) {
       conversation.consecutiveFailures = (conversation.consecutiveFailures || 0) + 1;
       log('ERROR', 'Ana: erro no pipeline', { err: err.message, tenantId: runtime.id, phone: conversation.phone });

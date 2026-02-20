@@ -14,6 +14,7 @@ const {
 } = require('./agents/ana');
 const { resolveTenant, listTenants } = require('./lib/tenants');
 const { loadCompanyData } = require('./lib/company-data-mcp');
+const { loadHistoryMessages } = require('./lib/supabase-messages');
 
 const app = express();
 const PORT = process.env.PORT || 3993;
@@ -1170,7 +1171,7 @@ app.get('/api/ana/conversations', (req, res) => {
     });
     const tenantId = tenant?.id || 'default';
     const search = String(req.query?.search || '').trim().toLowerCase();
-    const limit = Math.max(1, Math.min(200, Number(req.query?.limit || 50)));
+    const limit = Math.max(1, Math.min(200, Number(req.query?.limit || 200)));
     const evo = getEvolutionConfig(tenant, req.query?.instance || null);
 
     const inMemoryRows = Array.from(anaSessions.entries())
@@ -1315,10 +1316,19 @@ app.get('/api/ana/conversations', (req, res) => {
                 name: String(winner?.name || existing?.name || '').trim(),
                 avatarUrl: String(winner?.avatarUrl || existing?.avatarUrl || '').trim(),
                 remoteJid: String(winner?.remoteJid || existing?.remoteJid || '').trim(),
-                lastMessage: winner?.lastMessage || existing?.lastMessage || null,
-                lastActivityAt: (new Date(winner?.lastActivityAt || 0).getTime() >= new Date(existing?.lastActivityAt || 0).getTime())
-                    ? winner?.lastActivityAt
-                    : existing?.lastActivityAt,
+                lastMessage: (() => {
+                    const a = winner?.lastMessage;
+                    const b = existing?.lastMessage;
+                    if (!a) return b || null;
+                    if (!b) return a;
+                    return new Date(a.at || 0).getTime() >= new Date(b.at || 0).getTime() ? a : b;
+                })(),
+                lastActivityAt: (() => {
+                    const tA = new Date(winner?.lastActivityAt || winner?.lastMessage?.at || 0).getTime();
+                    const tB = new Date(existing?.lastActivityAt || existing?.lastMessage?.at || 0).getTime();
+                    return tA >= tB ? (winner?.lastActivityAt || winner?.lastMessage?.at || null)
+                                   : (existing?.lastActivityAt || existing?.lastMessage?.at || null);
+                })(),
             };
             dedup.set(keyPrimary, mergedRow);
         }
@@ -1446,11 +1456,47 @@ app.get('/api/ana/messages', (req, res) => {
             }))
             : [];
 
-        const mergedMessages = [...evolutionMessages, ...localMessages]
-            .filter((m) => m && String(m.content || '').trim())
-            .sort((a, b) => new Date(a.at || 0).getTime() - new Date(b.at || 0).getTime());
+        // Carregar histórico do Supabase (msg_history)
+        const supabaseCfg = tenant?.integrations?.supabase || {};
+        const supabaseUrl = safeTrim(supabaseCfg.url || process.env.SUPABASE_URL || '');
+        const serviceRoleKey = safeTrim(supabaseCfg.serviceRoleKey || process.env.SUPABASE_SERVICE_ROLE_KEY || '');
+        const companyId = safeTrim(
+            supabaseCfg.filterValue
+            || supabaseCfg.companyId
+            || process.env.COMPANY_MCP_FILTER_VALUE
+            || process.env.COMPANY_MCP_COMPANY_ID
+            || session?.companyData?.meta?.companyId
+            || ''
+        );
+        let supabaseMessages = [];
+        if (supabaseUrl && serviceRoleKey) {
+            supabaseMessages = await loadHistoryMessages({
+                supabaseUrl,
+                serviceRoleKey,
+                companyId,
+                phone,
+                limit,
+            }).catch(() => []);
+        }
 
-        const messages = (mergedMessages.length ? mergedMessages : localMessages).slice(-limit);
+        // Merge das três fontes; deduplicar por (role+conteúdo normalizado+minuto da hora)
+        const dedupKey = (m) => {
+            const minuteTs = m.at ? new Date(m.at).toISOString().slice(0, 16) : '';
+            const snippet = String(m.content || '').trim().slice(0, 80).toLowerCase().replace(/\s+/g, ' ');
+            return `${m.role || 'user'}|${minuteTs}|${snippet}`;
+        };
+        const seen = new Set();
+        const allMessages = [...supabaseMessages, ...evolutionMessages, ...localMessages]
+            .filter((m) => m && String(m.content || '').trim())
+            .sort((a, b) => new Date(a.at || 0).getTime() - new Date(b.at || 0).getTime())
+            .filter((m) => {
+                const k = dedupKey(m);
+                if (seen.has(k)) return false;
+                seen.add(k);
+                return true;
+            });
+
+        const messages = (allMessages.length ? allMessages : localMessages).slice(-limit);
         return res.json({
             success: true,
             tenantId,
