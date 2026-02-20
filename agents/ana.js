@@ -1580,6 +1580,53 @@ async function createOrderByProviderIfNeeded({ conversation, runtime, apiRequest
   return createSaiposOrder({ conversation, runtime, apiRequest, getEnvConfig, log });
 }
 
+function toReaisAmount(v) {
+  const n = Number(v || 0);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  const raw = String(v || '');
+  if (!raw.includes('.') && !raw.includes(',') && n >= 100) return n / 100;
+  return n;
+}
+
+function isBeverageItemName(name = '') {
+  const n = normalizeForMatch(name);
+  if (!n) return false;
+  return /\b(coca|cola|refrigerante|refri|suco|agua|agua de coco|cha|cafe|cafezinho|cerveja|guarana|fanta|sprite|pepsi)\b/.test(n);
+}
+
+function resolveDeliveryFee(conversation, tx) {
+  const deliveryAreas = Array.isArray(conversation?.companyData?.deliveryAreas) ? conversation.companyData.deliveryAreas : [];
+  if (!deliveryAreas.length) return null;
+  const neighborhood = normalizeForMatch(tx?.address?.neighborhood || '');
+  const street = normalizeForMatch(tx?.address?.street_name || '');
+  const targets = [neighborhood, street].filter(Boolean);
+  if (!targets.length) return null;
+
+  let best = null;
+  let bestScore = 0;
+  for (const area of deliveryAreas) {
+    const areaName = cleanText(area?.neighborhood || area?.bairro || area?.name || '');
+    const areaNorm = normalizeForMatch(areaName);
+    if (!areaNorm) continue;
+    let score = 0;
+    for (const t of targets) {
+      if (t === areaNorm) score = Math.max(score, 100);
+      else if (t.includes(areaNorm) || areaNorm.includes(t)) score = Math.max(score, 70);
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = area;
+    }
+  }
+  if (!best) return null;
+  const fee = toReaisAmount(best?.fee ?? best?.taxa ?? best?.delivery_fee ?? 0);
+  if (fee <= 0) return null;
+  return {
+    neighborhood: cleanText(best?.neighborhood || best?.bairro || best?.name || ''),
+    fee,
+  };
+}
+
 function fallbackText(runtime, action, tx, missing, conversation = null) {
   const firstName = cleanText(tx?.customer_name || '').split(' ')[0] || '';
   const hi = firstName ? `${firstName}, ` : '';
@@ -1661,9 +1708,11 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
     const itemLines = (tx.items || []).map((it) => `• ${it.quantity}x ${it.name}`).join('\n') || '—';
     const mcp = conversation?.companyData || {};
     const menu = Array.isArray(mcp.menu) ? mcp.menu : [];
+    const cartHasBeverage = (tx.items || []).some((it) => isBeverageItemName(it.name));
     const cartNorms = (tx.items || []).map((it) => normalizeForMatch(it.name));
     const extras = menu
       .filter((m) => m.available !== false && !cartNorms.includes(normalizeForMatch(m.name)))
+      .filter((m) => !(cartHasBeverage && isBeverageItemName(m.name)))
       .slice(0, 3)
       .map((m) => m.name);
     const suggestionLine = extras.length
@@ -1690,9 +1739,12 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
       const addrParts = [tx.address.street_name, tx.address.street_number, tx.address.neighborhood, tx.address.city].filter(Boolean);
       addrLine = `\nEndereço: ${addrParts.join(', ')}`;
     }
-    const total = (tx.items || []).reduce((sum, it) => sum + (Number(it.unit_price || 0) * Number(it.quantity || 1)), 0);
+    const feeInfo = tx.mode === 'DELIVERY' ? resolveDeliveryFee(conversation, tx) : null;
+    const feeCents = feeInfo ? Math.round(Number(feeInfo.fee || 0) * 100) : 0;
+    const feeLine = feeInfo ? `\n*Taxa de entrega:* ${formatBRL(feeInfo.fee)}` : '';
+    const total = (tx.items || []).reduce((sum, it) => sum + (Number(it.unit_price || 0) * Number(it.quantity || 1)), 0) + feeCents;
     const totalLine = total > 0 ? `\n*Total: ${formatBRL(total / 100)}*` : '';
-    return `Aqui está o resumo do seu pedido 👇\n\n*Itens:*\n${items}\n\n*Modalidade:* ${mode}${addrLine}\n*Pagamento:* ${payment}${totalLine}\n\nEstá tudo certo? 😊`;
+    return `Aqui está o resumo do seu pedido 👇\n\n*Itens:*\n${items}\n\n*Modalidade:* ${mode}${addrLine}${feeLine}\n*Pagamento:* ${payment}${totalLine}\n\nEstá tudo certo? 😊`;
   }
 
   if (action === 'CREATE_ORDER_AND_WAIT_PAYMENT') {
@@ -1864,10 +1916,17 @@ function buildContextualAnswer(conversation, userMessage = '') {
     if (bairroMatch && deliveryAreas.length) {
       const asked = normalizeForMatch(bairroMatch[1]);
       const found = deliveryAreas.find((a) => normalizeForMatch(a.neighborhood).includes(asked) || asked.includes(normalizeForMatch(a.neighborhood)));
-      if (found) return `A taxa para ${found.neighborhood} é ${formatBRL(found.fee)}.`;
+      if (found) return `A taxa para ${found.neighborhood} é ${formatBRL(toReaisAmount(found?.fee ?? found?.taxa ?? found?.delivery_fee ?? 0))}.`;
+    }
+    if (/\b(taxa|entrega|delivery)\b/.test(text)) {
+      const feeInfo = resolveDeliveryFee(conversation, conversation?.transaction || {});
+      if (feeInfo) return `A taxa de entrega para ${feeInfo.neighborhood || 'sua região'} é ${formatBRL(feeInfo.fee)}.`;
     }
     if (deliveryAreas.length) {
-      const sample = deliveryAreas.slice(0, 5).map((a) => `${a.neighborhood} (${formatBRL(a.fee)})`).join(', ');
+      const sample = deliveryAreas
+        .slice(0, 5)
+        .map((a) => `${a.neighborhood} (${formatBRL(toReaisAmount(a?.fee ?? a?.taxa ?? a?.delivery_fee ?? 0))})`)
+        .join(', ');
       return `Entregamos em: ${sample}.`;
     }
     return 'Ainda não encontrei as áreas de entrega cadastradas.';
@@ -1886,6 +1945,7 @@ async function generatorAgent({ runtime, conversation, customer, classification,
   });
   const deterministic = {
     state: conversation.state,
+    greeted: Boolean(conversation.greeted),
     action: orchestratorResult.action,
     intent: classification.intent,
     missing: orchestratorResult.missing || [],
@@ -1942,6 +2002,8 @@ REGRAS OBRIGATÓRIAS:
 - Emojis com moderação (um por mensagem é suficiente)
 - Se o cliente estiver frustrado, reconheça com empatia antes de continuar
 - (action=ORDER_REVIEW) Formatar resumo com bullets, separar itens / modalidade / endereço / pagamento / total em linhas separadas
+- Não se reapresente em toda mensagem; apresente-se apenas no primeiro contato do dia (ou quando o cliente pedir)
+- Se o cliente já pediu bebida, não sugira bebida de novo; prefira sobremesa ou complemento
 
 ESTILO: Use linguagem natural brasileira. Evite palavras robóticas. Prefira "já anotei", "pode deixar", "tudo certo".
 No ORDER_REVIEW use quebras de linha reais entre seções — não coloque tudo numa linha só.
@@ -2380,17 +2442,19 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
         const deterministicMenu = buildMenuReply(conversation, followUp);
         if (deterministicMenu) return deterministicMenu;
       }
-      if (deterministicActions.has(orchestratorResult.action)) {
-        if (orchestratorResult.action === 'ANSWER_AND_RESUME' || orchestratorResult.action === 'ANSWER_AND_RESUME_CONFIRM' || orchestratorResult.action === 'ANSWER_AND_RESUME_REPEAT') {
-          const contextual = buildContextualAnswer(conversation, text);
-          if (contextual) {
-            const followAction = orchestratorResult.action === 'ANSWER_AND_RESUME_CONFIRM'
-              ? 'ASK_FIELD_CONFIRMATION'
-              : (orchestratorResult.action === 'ANSWER_AND_RESUME_REPEAT' ? 'ASK_REPEAT_LAST_ORDER' : 'ASK_MISSING_FIELDS');
-            const follow = fallbackText(runtime, followAction, conversation.transaction, orchestratorResult.missing || [], conversation);
-            return `${contextual} ${follow}`.trim();
-          }
+      const contextualActions = new Set(['ANSWER_AND_RESUME', 'ANSWER_AND_RESUME_CONFIRM', 'ANSWER_AND_RESUME_REPEAT', 'ANSWER_AND_CONFIRM']);
+      if (contextualActions.has(orchestratorResult.action)) {
+        const contextual = buildContextualAnswer(conversation, text);
+        if (contextual) {
+          let followAction = 'ASK_MISSING_FIELDS';
+          if (orchestratorResult.action === 'ANSWER_AND_RESUME_CONFIRM') followAction = 'ASK_FIELD_CONFIRMATION';
+          else if (orchestratorResult.action === 'ANSWER_AND_RESUME_REPEAT') followAction = 'ASK_REPEAT_LAST_ORDER';
+          else if (orchestratorResult.action === 'ANSWER_AND_CONFIRM') followAction = 'ASK_CONFIRMATION';
+          const follow = fallbackText(runtime, followAction, conversation.transaction, orchestratorResult.missing || [], conversation);
+          return `${contextual} ${follow}`.trim();
         }
+      }
+      if (deterministicActions.has(orchestratorResult.action)) {
         return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing || [], conversation);
       }
       return null;
