@@ -473,6 +473,7 @@ function getConversation(phone, tenantId = 'default') {
     repeatPreview: '',
     orderStoredForCustomer: false,
     greeted: false,
+    greetedDate: '',
     messages: [],
     catalog: null,
   });
@@ -497,6 +498,7 @@ function getConversation(phone, tenantId = 'default') {
   if (typeof conv.lastRepeatOfferDate !== 'string') conv.lastRepeatOfferDate = '';
   if (typeof conv.repeatPreview !== 'string') conv.repeatPreview = '';
   if (typeof conv.orderStoredForCustomer !== 'boolean') conv.orderStoredForCustomer = false;
+  if (typeof conv.greetedDate !== 'string') conv.greetedDate = '';
   if (
     !conv.itemsPhaseComplete
     && Array.isArray(conv.transaction?.items) && conv.transaction.items.length > 0
@@ -540,8 +542,9 @@ function sanitizeAssistantReply({ reply, conversation, action }) {
   let text = String(reply || '').trim();
   if (!text) return '';
 
-  const firstInteraction = !Boolean(conversation?.greeted);
-  const allowIntroduction = firstInteraction && action === 'WELCOME';
+  const today = nowISO().slice(0, 10);
+  const alreadyPresentedToday = cleanText(conversation?.greetedDate || '') === today;
+  const allowIntroduction = !alreadyPresentedToday && action === 'WELCOME';
   if (!allowIntroduction) {
     text = text
       .replace(
@@ -556,6 +559,54 @@ function sanitizeAssistantReply({ reply, conversation, action }) {
   }
 
   return text || String(reply || '').trim();
+}
+
+function applyRecentUserContextToExtraction({ conversation, runtime, extracted }) {
+  if (runtime.segment !== 'restaurant') return;
+  const recentUserTexts = (conversation?.messages || [])
+    .filter((m) => m?.role === 'user')
+    .slice(-8)
+    .map((m) => cleanText(m?.content || ''))
+    .filter(Boolean);
+  if (!recentUserTexts.length) return;
+
+  const tx = conversation.transaction || {};
+  if (!extracted.address || typeof extracted.address !== 'object') extracted.address = {};
+
+  if (!cleanText(extracted.mode) && !cleanText(tx.mode)) {
+    for (let idx = recentUserTexts.length - 1; idx >= 0; idx--) {
+      const msg = recentUserTexts[idx];
+      const low = msg.toLowerCase();
+      if (/retirada|retirar|balcao/.test(low)) { extracted.mode = 'TAKEOUT'; break; }
+      if (/entreg|delivery/.test(low)) { extracted.mode = 'DELIVERY'; break; }
+      const addr = extractAddressFromText(msg);
+      if (cleanText(addr.street_name) || cleanText(addr.neighborhood)) { extracted.mode = 'DELIVERY'; break; }
+    }
+  }
+
+  if (!cleanText(extracted.payment) && !cleanText(tx.payment)) {
+    for (let idx = recentUserTexts.length - 1; idx >= 0; idx--) {
+      const low = recentUserTexts[idx].toLowerCase();
+      if (/(pix|piz|piks|piquis)\b/.test(low)) { extracted.payment = 'PIX'; break; }
+      if (/(cartao|cartão|cr[eé]dito|d[eé]bito)/.test(low)) { extracted.payment = 'CARD'; break; }
+      if (/dinheiro|especie|espécie|cash|nota/.test(low)) { extracted.payment = 'CASH'; break; }
+    }
+  }
+
+  const needsAddress = [
+    'street_name', 'street_number', 'neighborhood',
+  ].some((k) => !cleanText(extracted.address?.[k]) && !cleanText(tx.address?.[k]));
+  const modeCandidate = cleanText(extracted.mode || tx.mode);
+  if (needsAddress && (!modeCandidate || modeCandidate === 'DELIVERY')) {
+    for (let idx = recentUserTexts.length - 1; idx >= 0; idx--) {
+      const addr = extractAddressFromText(recentUserTexts[idx]);
+      for (const key of ['street_name', 'street_number', 'neighborhood', 'city', 'state', 'postal_code']) {
+        if (!cleanText(extracted.address?.[key]) && !cleanText(tx.address?.[key]) && cleanText(addr?.[key])) {
+          extracted.address[key] = cleanText(addr[key]);
+        }
+      }
+    }
+  }
 }
 
 function normalizeCatalog(rawCatalog) {
@@ -881,16 +932,24 @@ function mergeRestaurantTransaction(conv, extracted) {
       }
     }
   }
+  if (
+    !cleanText(conv.transaction.mode)
+    && (cleanText(conv.transaction.address?.street_name) || cleanText(conv.transaction.address?.neighborhood))
+  ) {
+    conv.transaction.mode = 'DELIVERY';
+    markFieldChanged(conv, 'mode');
+  }
 }
 
 function restaurantMissingFields(runtime, tx, confirmed = {}, options = {}) {
   const missing = [];
   const hasItems = Array.isArray(tx.items) && tx.items.length > 0;
   const itemsPhaseComplete = options.itemsPhaseComplete !== false;
+  const hasAddressHint = Boolean(cleanText(tx.address?.street_name) || cleanText(tx.address?.neighborhood));
   if (!hasItems) missing.push('items');
   if (hasItems && tx.items.some((i) => !Number(i.quantity) || Number(i.quantity) <= 0)) missing.push('items');
   if (hasItems && !itemsPhaseComplete) return Array.from(new Set(missing.concat('items')));
-  if (!tx.mode) missing.push('mode');
+  if (!tx.mode && !hasAddressHint) missing.push('mode');
   if (tx.mode === 'DELIVERY' && runtime.delivery.requireAddress) {
     for (const f of ['street_name', 'street_number', 'neighborhood']) {
       if (!cleanText(tx.address?.[f])) missing.push(`address.${f}`);
@@ -2315,6 +2374,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     || (runtime.segment === 'restaurant' && Boolean(conversation.pendingFieldConfirmation));
   const extracted = shouldExtract ? await extractorAgent({ runtime, groupedText: normalizedText }) : {};
   if (runtime.segment === 'restaurant') {
+    applyRecentUserContextToExtraction({ conversation, runtime, extracted });
     const menuPool = [
       ...(Array.isArray(conversation?.companyData?.menu) ? conversation.companyData.menu : []),
       ...(Array.isArray(conversation.catalog) ? conversation.catalog : []),
@@ -2536,7 +2596,10 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       });
     }
     if (conversation.state === STATES.HUMAN_HANDOFF) conversation.handoffNotified = true;
-    if (sent) conversation.greeted = true;
+    if (sent) {
+      conversation.greeted = true;
+      conversation.greetedDate = nowISO().slice(0, 10);
+    }
   }
 
   appendMessage(conversation, 'assistant', reply, {
