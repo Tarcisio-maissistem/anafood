@@ -84,6 +84,41 @@ const normalizeForMatch = (v) => String(v || '')
   .replace(/\s+/g, ' ')
   .trim();
 const tokenizeNormalized = (v) => normalizeForMatch(v).split(' ').filter(Boolean);
+const singularizeToken = (token) => {
+  let t = String(token || '').trim().toLowerCase();
+  if (!t) return t;
+  if (/oes$/.test(t)) return t.slice(0, -3) + 'ao';
+  if (/aes$/.test(t)) return t.slice(0, -3) + 'ao';
+  if (/is$/.test(t)) return t.slice(0, -2) + 'il';
+  if (/res$/.test(t)) return t.slice(0, -1);
+  if (/es$/.test(t) && t.length > 4) return t.slice(0, -2);
+  if (/s$/.test(t) && t.length > 3) return t.slice(0, -1);
+  return t;
+};
+const canonicalTokens = (v) => tokenizeNormalized(v).map(singularizeToken).filter(Boolean);
+
+function getCompanyDisplayName(runtime, conversation = null) {
+  const company = conversation?.companyData?.company || {};
+  const fromMcp = cleanText(
+    company.trade_name
+    || company.fantasy_name
+    || company.display_name
+    || company.company_name
+    || company.name
+    || company.razao_social
+    || company.legal_name
+    || ''
+  );
+  if (fromMcp) return fromMcp;
+
+  const fromContext = cleanText(runtime?.companyContext?.companyName || '');
+  if (fromContext && !/^ana\s*food$/i.test(fromContext)) return fromContext;
+
+  const fromRuntime = cleanText(runtime?.name || '');
+  if (fromRuntime && !/^ana\s*food$/i.test(fromRuntime)) return fromRuntime;
+
+  return '';
+}
 
 const normalizeStateUF = (value) => {
   const raw = cleanText(value).toUpperCase();
@@ -477,6 +512,12 @@ function extractItemsFromFreeText(text) {
       quantity = Number(q) || qtyWords[q] || 1;
       chunk = cleanText(chunk.slice(qtyPrefix[0].length));
     } else {
+      const qtyAnywhere = chunk.match(/\b(\d+|um|uma|dois|duas|tres|quatro|cinco)\b/i);
+      if (qtyAnywhere) {
+        const q = qtyAnywhere[1].toLowerCase();
+        quantity = Number(q) || qtyWords[q] || 1;
+        chunk = cleanText(chunk.replace(qtyAnywhere[0], ' '));
+      }
       const qtyInline = chunk.match(/\b(\d+)\s*x\b/i);
       if (qtyInline) {
         quantity = Math.max(1, Number(qtyInline[1]) || 1);
@@ -486,7 +527,9 @@ function extractItemsFromFreeText(text) {
 
     const cleanedName = cleanText(
       chunk
-        .replace(/^(quero|gostaria(?:\s+de)?|pedido|me\s+ve|me\s+v[eê]|me\s+manda)\s+/i, '')
+        .replace(/^(quero|gostaria(?:\s+de)?|pedido|me\s+ve|me\s+v[eê]|me\s+manda|faltou|inclui|inclua|adiciona|adicione|acrescenta|acrescente)\s+/i, '')
+        .replace(/\b(faltou|inclui|inclua|adiciona|adicione|acrescenta|acrescente|mais|tambem|também|so|só)\b/gi, ' ')
+        .replace(/\b(os|as|o|a|uns|umas|de|do|da|dos|das)\b/gi, ' ')
         .replace(/\b(para|pra)\s+(entrega|delivery|retirada|retirar)\b/gi, '')
         .replace(/\b(no|na)\s+(pix|dinheiro|cart[aã]o|cartao|credito|d[eé]bito|debito)\b/gi, '')
         .replace(/\s+/g, ' ')
@@ -955,6 +998,16 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
     if (yes) return conversation.transaction.payment === 'PIX'
       ? { nextState: STATES.WAITING_PAYMENT, action: 'CREATE_ORDER_AND_WAIT_PAYMENT', missing: [] }
       : { nextState: STATES.CONFIRMED, action: 'CREATE_ORDER_AND_CONFIRM', missing: [] };
+    const hasOrderChange = Boolean(
+      (Array.isArray(extracted?.items) && extracted.items.length > 0)
+      || cleanText(extracted?.mode)
+      || cleanText(extracted?.payment)
+      || cleanText(extracted?.notes)
+    );
+    if (hasOrderChange) return { nextState: STATES.WAITING_CONFIRMATION, action: 'ORDER_REVIEW', missing: [] };
+    if (/\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar)\b/i.test(groupedText)) {
+      return { nextState: STATES.COLLECTING_DATA, action: 'REQUEST_ADJUSTMENTS', missing: [] };
+    }
     // Consultation question while waiting confirmation: answer then re-ask
     if (i === INTENTS.CONSULTA || hasQuestion) return { nextState: STATES.WAITING_CONFIRMATION, action: 'ANSWER_AND_CONFIRM', missing: [] };
     return { nextState: STATES.WAITING_CONFIRMATION, action: 'ASK_CONFIRMATION', missing: [] };
@@ -1053,6 +1106,7 @@ function resolveItemsWithCatalog(items, catalog) {
     raw: item,
     normalized: normalizeForMatch(item?.name || ''),
     tokens: tokenizeNormalized(item?.name || ''),
+    canonical: canonicalTokens(item?.name || ''),
   })).filter((i) => i.normalized);
 
   const findBestCatalogMatch = (rawName) => {
@@ -1060,6 +1114,8 @@ function resolveItemsWithCatalog(items, catalog) {
     if (!target) return null;
     const targetTokens = tokenizeNormalized(target);
     const targetSet = new Set(targetTokens);
+    const targetCanonical = canonicalTokens(target);
+    const targetCanonicalSet = new Set(targetCanonical);
     let best = null;
     let bestScore = 0;
 
@@ -1072,7 +1128,10 @@ function resolveItemsWithCatalog(items, catalog) {
       } else {
         const overlap = item.tokens.filter((t) => targetSet.has(t)).length;
         const ratio = overlap / Math.max(item.tokens.length, targetTokens.length, 1);
-        if (ratio >= 0.6) score = 500 + Math.round(ratio * 100);
+        const canonicalOverlap = item.canonical.filter((t) => targetCanonicalSet.has(t)).length;
+        const canonicalRatio = canonicalOverlap / Math.max(item.canonical.length, targetCanonical.length, 1);
+        const bestRatio = Math.max(ratio, canonicalRatio);
+        if (bestRatio >= 0.6) score = 500 + Math.round(bestRatio * 120);
       }
       if (score > bestScore) {
         bestScore = score;
@@ -1332,7 +1391,7 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   const firstName = cleanText(tx?.customer_name || '').split(' ')[0] || '';
   const hi = firstName ? `${firstName}, ` : '';
   const agentName = runtime?.agentName || 'Ana';
-  const companyName = cleanText(runtime?.companyContext?.companyName || runtime?.name || '');
+  const companyName = getCompanyDisplayName(runtime, conversation);
 
   if (action === 'WELCOME') {
     const identity = companyName
@@ -1639,7 +1698,7 @@ async function generatorAgent({ runtime, conversation, customer, classification,
     return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing, conversation);
   }
   try {
-    const companyName = cleanText(runtime.companyContext?.companyName || runtime.name || '');
+    const companyName = getCompanyDisplayName(runtime, conversation);
     const customerFirstName = cleanText(customer?.name || deterministic.customerProfile?.customerName || '').split(' ')[0] || '';
     const c = await openai.chat.completions.create({
       model: runtime.model,
@@ -2073,7 +2132,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       const followUp = fallbackText(runtime, followUpAction, conversation.transaction, orchestratorResult.missing || [], conversation);
       // Saudação com identidade da empresa e nome do cliente
       const agentN = runtime.agentName || 'Ana';
-      const companyN = cleanText(runtime.companyContext?.companyName || runtime.name || '');
+      const companyN = getCompanyDisplayName(runtime, conversation);
       const clientFirstName = cleanText(customer?.name || conversation.transaction?.customer_name || '').split(' ')[0];
       const personalGreeting = clientFirstName ? `Olá, ${clientFirstName}! ` : 'Olá! ';
       const identity = companyN ? `Aqui é a ${agentN} do ${companyN} 😊` : `Aqui é a ${agentN} 😊`;
@@ -2313,4 +2372,3 @@ module.exports = {
   STATES,
   INTENTS,
 };
-

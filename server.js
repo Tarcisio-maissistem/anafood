@@ -329,19 +329,6 @@ const resolveMediaType = (mimeType = '', fileName = '', mediaKind = '') => {
 const sendEvolutionMedia = async ({ apiUrl, apiKey, instance, phone, remoteJid, base64, mimeType, fileName, caption = '', mediaKind = '' }) => {
     if (!apiUrl || !apiKey || !instance || !base64) return { ok: false, error: 'Parametros invalidos para envio de midia' };
     const resolvedMediaType = resolveMediaType(mimeType, fileName, mediaKind);
-    const safeMimeType = mimeType || (
-        resolvedMediaType === 'image' ? 'image/jpeg'
-            : resolvedMediaType === 'video' ? 'video/mp4'
-                : resolvedMediaType === 'audio' ? 'audio/ogg'
-                    : 'application/octet-stream'
-    );
-    const safeFileName = fileName || (
-        resolvedMediaType === 'image' ? 'imagem.jpg'
-            : resolvedMediaType === 'video' ? 'video.mp4'
-                : resolvedMediaType === 'audio' ? 'audio.ogg'
-                    : 'arquivo.bin'
-    );
-    const mediaDataUrl = `data:${safeMimeType};base64,${base64}`;
 
     const rawPhone = String(phone || '').trim();
     const digitsPhone = normalizePhone(rawPhone);
@@ -353,74 +340,90 @@ const sendEvolutionMedia = async ({ apiUrl, apiKey, instance, phone, remoteJid, 
         safeTrim(remoteJid),
         digitsPhone ? `${digitsPhone}@lid` : '',
     ].filter(Boolean)));
-    const endpoints = [
+
+    const postJson = async (endpoint, body) => {
+        const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+                apikey: apiKey,
+                Authorization: `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+        });
+        if (res.ok) return true;
+        const txt = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status} ${txt}`);
+    };
+
+    // ── ÁUDIO: enviar obrigatoriamente como PTT (nota de voz) ──────────────────
+    // Usa sendWhatsAppAudio e sendPtt com encoding:true para que a Evolution API
+    // converta qualquer formato (webm, ogg, mp4…) para OGG/OPUS antes de entregar.
+    if (resolvedMediaType === 'audio') {
+        const audioEndpoints = [
+            `${apiUrl}/message/sendWhatsAppAudio/${instance}`,
+            `${apiUrl}/message/sendPtt/${instance}`,
+            `${apiUrl}/message/sendMedia/${instance}`,
+        ];
+        const audioPayloads = [
+            // Evolution v2 — sendWhatsAppAudio com re-encoding automático
+            { audio: base64, encoding: true, delay: 600 },
+            // Evolution v2 — campo alternativo
+            { audio: base64, encoding: true, ptt: true },
+            // Evolution v2 — sendMedia com ptt:true e mime OGG/OPUS
+            { mediatype: 'audio', mimetype: 'audio/ogg; codecs=opus', media: base64, ptt: true, encoding: true },
+            // Fallback mínimo
+            { audio: base64, ptt: true },
+        ];
+
+        let lastError = null;
+        for (const number of numbers) {
+            for (const ep of audioEndpoints) {
+                for (const pl of audioPayloads) {
+                    try {
+                        const ok = await postJson(ep, { ...pl, number });
+                        if (ok) return { ok: true };
+                    } catch (err) { lastError = err.message; }
+                }
+            }
+        }
+        return { ok: false, error: lastError || 'Falha ao enviar PTT' };
+    }
+
+    // ── IMAGEM / VÍDEO / DOCUMENTO ─────────────────────────────────────────────
+    const safeMimeType = mimeType || (
+        resolvedMediaType === 'image' ? 'image/jpeg'
+            : resolvedMediaType === 'video' ? 'video/mp4'
+                : 'application/octet-stream'
+    );
+    const safeFileName = fileName || (
+        resolvedMediaType === 'image' ? 'imagem.jpg'
+            : resolvedMediaType === 'video' ? 'video.mp4'
+                : 'arquivo.bin'
+    );
+    const mediaDataUrl = `data:${safeMimeType};base64,${base64}`;
+
+    const mediaEndpoints = [
         `${apiUrl}/message/sendMedia/${instance}`,
         `${apiUrl}/message/sendFileFromBase64/${instance}`,
-        `${apiUrl}/message/sendWhatsAppAudio/${instance}`,
-        `${apiUrl}/message/sendPtt/${instance}`,
     ];
-    const payloads = [
-        {
-            number: null,
-            mediatype: resolvedMediaType,
-            mimetype: safeMimeType,
-            fileName: safeFileName,
-            caption,
-            media: base64,
-            ptt: resolvedMediaType === 'audio',
-        },
-        {
-            number: null,
-            mediatype: resolvedMediaType,
-            mimetype: safeMimeType,
-            fileName: safeFileName,
-            caption,
-            media: mediaDataUrl,
-            ptt: resolvedMediaType === 'audio',
-        },
-        {
-            number: null,
-            audio: base64,
-            ptt: true,
-        },
-        {
-            number: null,
-            options: { delay: 600 },
-            mediaMessage: {
-                mediatype: resolvedMediaType,
-                mimetype: safeMimeType,
-                fileName: safeFileName,
-                caption,
-                media: base64,
-                ptt: resolvedMediaType === 'audio',
-            },
-        },
+    const mediaPayloads = [
+        { mediatype: resolvedMediaType, mimetype: safeMimeType, fileName: safeFileName, caption, media: base64 },
+        { mediatype: resolvedMediaType, mimetype: safeMimeType, fileName: safeFileName, caption, media: mediaDataUrl },
+        { options: { delay: 600 }, mediaMessage: { mediatype: resolvedMediaType, mimetype: safeMimeType, fileName: safeFileName, caption, media: base64 } },
     ];
 
     let lastError = null;
     for (const number of numbers) {
-        for (const endpoint of endpoints) {
-            for (const payloadTemplate of payloads) {
+        for (const ep of mediaEndpoints) {
+            for (const pl of mediaPayloads) {
                 try {
-                    const response = await fetch(endpoint, {
-                        method: 'POST',
-                        headers: {
-                            apikey: apiKey,
-                            Authorization: `Bearer ${apiKey}`,
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({ ...payloadTemplate, number }),
-                    });
-                    if (response.ok) return { ok: true };
-                    const bodyText = await response.text().catch(() => '');
-                    lastError = `HTTP ${response.status} ${bodyText}`;
-                } catch (err) {
-                    lastError = err.message;
-                }
+                    const ok = await postJson(ep, { ...pl, number });
+                    if (ok) return { ok: true };
+                } catch (err) { lastError = err.message; }
             }
         }
     }
-
     return { ok: false, error: lastError || 'Falha desconhecida no envio de midia' };
 };
 
@@ -2463,8 +2466,23 @@ app.get(/^\/(?!api(?:\/|$)|webhook(?:\/|$)).*/, (req, res, next) => {
 
 // ─── Start ───────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
     log('INFO', `Servidor SAIPOS API rodando em http://localhost:${PORT}`);
     log('INFO', 'Documentação rápida disponível em http://localhost:' + PORT + '/');
 });
+
+
+function gracefulShutdown(signal) {
+    try {
+        log('WARN', `Recebido ${signal}. Encerrando servidor HTTP...`);
+    } catch (_) {}
+    httpServer.close(() => {
+        try { log('INFO', 'Servidor HTTP encerrado com sucesso.'); } catch (_) {}
+        process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 5000).unref();
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 

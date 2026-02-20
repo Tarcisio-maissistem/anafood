@@ -530,7 +530,16 @@
       return;
     }
     try {
-      state.recordStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Solicitar áudio mono com redução de ruído — navegador pode ou não honrar sampleRate
+      state.recordStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,        // mono
+          sampleRate: 16000,      // 16kHz (melhor compatibilidade com WhatsApp)
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
     } catch (e) {
       setStatus(`Permissão de microfone negada: ${e.message}`, 'err');
       return;
@@ -538,9 +547,10 @@
     const mimeType = pickRecordMime();
     state.audioChunks = [];
     try {
-      state.recorder = mimeType
-        ? new MediaRecorder(state.recordStream, { mimeType })
-        : new MediaRecorder(state.recordStream);
+      // audioBitsPerSecond: 24000 = 24kbps (dentro da faixa 16-32kbps exigida pelo WhatsApp PTT)
+      const recOpts = { audioBitsPerSecond: 24000 };
+      if (mimeType) recOpts.mimeType = mimeType;
+      state.recorder = new MediaRecorder(state.recordStream, recOpts);
     } catch (e) {
       setStatus(`Não foi possível iniciar a gravação: ${e.message}`, 'err');
       state.recordStream.getTracks().forEach(t => t.stop());
