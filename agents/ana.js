@@ -846,9 +846,55 @@ async function normalizeMessageBlock({ rawText, rawMessage }) {
   }
 }
 
+// ── Detecção determinística de correção (REGEX > LLM) ──────────────────────
+function detectCorrection(text) {
+  const lower = cleanText(text).toLowerCase();
+  // Padrões de correção de quantidade
+  const qtyCorrection = lower.match(
+    /(?:somente|apenas|só|so)\s+(?:um|uma|1)\s*(.*)/i
+  ) || lower.match(
+    /(?:não|nao)\s+(?:é|e)\s+\d+.+(?:é|e)\s+(?:somente|apenas|só|so)?\s*(?:um|uma|1)/i
+  ) || lower.match(
+    /(?:corrige|corrigir|mudar?|alterar?)\s+(?:para|pra)\s+(\d+)/i
+  ) || lower.match(
+    /(?:é|e)\s+(?:somente|apenas|só|so)\s+(?:um|uma|1)\s*(.*)/i
+  );
+  // Padrões genéricos de erro
+  const isError = /\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar|ta errado|tá errado|está errado|errado|errei|incorreto|troquei|trocar|troca|errei|n[aã]o [eé] isso)\b/i.test(lower);
+  if (qtyCorrection) {
+    // Extrair nova quantidade da correção
+    const numMatch = lower.match(/(?:somente|apenas|só|so)\s+(\d+|um|uma|dois|duas|tres|quatro|cinco)/i)
+      || lower.match(/(?:corrige|mudar?|alterar?)\s+(?:para|pra)\s+(\d+)/i);
+    const qtyWords = { um: 1, uma: 1, dois: 2, duas: 2, tres: 3, quatro: 4, cinco: 5 };
+    const newQty = numMatch ? (Number(numMatch[1]) || qtyWords[numMatch[1]?.toLowerCase()] || 1) : 1;
+    return { isCorrection: true, type: 'QTY_UPDATE', newQty };
+  }
+  if (isError) return { isCorrection: true, type: 'GENERIC_ERROR', newQty: null };
+  return { isCorrection: false, type: null, newQty: null };
+}
+
+// ── Normalização determinística de quantidade (barreira pós-extração) ────────
+function normalizeQuantityFromText(items, originalText) {
+  if (!Array.isArray(items) || !items.length) return items;
+  const text = cleanText(originalText).toLowerCase();
+  // Se texto contém número explícito > 1 OU palavra de multiplicidade → confiar na extração
+  const hasExplicitMultiple = /\b([2-9]|\d{2,})\b/.test(text);
+  const hasWordMultiple = /\b(dois|duas|tres|três|quatro|cinco|seis|sete|oito|nove|dez)\b/.test(text);
+  if (hasExplicitMultiple || hasWordMultiple) return items;
+  // Sem número explícito > 1 → TODOS os itens são qty=1 (nunca inferir multiplicidade)
+  return items.map(it => ({ ...it, quantity: 1 }));
+}
+
 async function classifierAgent({ runtime, conversation, groupedText }) {
   const lower = groupedText.toLowerCase();
   if (/atendente|humano|pessoa/.test(lower)) return { intent: INTENTS.HUMANO, requires_extraction: false, handoff: true, confidence: 1 };
+
+  // CORREÇÃO: regex ANTES do classificador LLM — nunca deixar modelo decidir isso
+  const correction = detectCorrection(groupedText);
+  if (correction.isCorrection) {
+    return { intent: 'CORRECAO', requires_extraction: false, handoff: false, confidence: 0.95, correction };
+  }
+
   if (/\b(horario|funcionamento|endereco|endereço|pagamento|formas de pagamento|valor|pre[cç]o|card[aá]pio|cardapio|menu)\b/.test(lower)) {
     return { intent: INTENTS.CONSULTA, requires_extraction: false, handoff: false, confidence: 0.95 };
   }
@@ -1376,14 +1422,53 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
 
   // ── FINALIZANDO (ex-WAITING_CONFIRMATION) ──────────────────────────────
   if (s === STATES.FINALIZANDO) {
-    if (no || i === INTENTS.CANCELAMENTO) return { nextState: STATES.ADICIONANDO_ITEM, action: 'REQUEST_ADJUSTMENTS', missing: [] };
+    if (i === INTENTS.CANCELAMENTO) return { nextState: STATES.ADICIONANDO_ITEM, action: 'REQUEST_ADJUSTMENTS', missing: [] };
     if (yes) return conversation.transaction.payment === 'PIX'
       ? { nextState: STATES.WAITING_PAYMENT, action: 'CREATE_ORDER_AND_WAIT_PAYMENT', missing: [] }
       : { nextState: STATES.CONFIRMED, action: 'CREATE_ORDER_AND_CONFIRM', missing: [] };
-    // Detecção de correção: reconstruir e reexibir resumo
-    if (/\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar|ta errado|tá errado|está errado|errado|errei)\b/i.test(groupedText)) {
-      return { nextState: STATES.ADICIONANDO_ITEM, action: 'CORRECTION_REBUILD', missing: [] };
+
+    // ── CORREÇÃO DETERMINÍSTICA: permanece em FINALIZANDO, aplica UPDATE_ITEM ──
+    if (i === 'CORRECAO' || /\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar|ta errado|tá errado|está errado|errado|errei|n[aã]o [eé] isso)\b/i.test(groupedText)) {
+      const correction = classification.correction || detectCorrection(groupedText);
+      if (correction.type === 'QTY_UPDATE' && correction.newQty != null) {
+        // UPDATE_ITEM: aplicar correção de quantidade diretamente no carrinho
+        const corrText = normalizeForMatch(groupedText);
+        const items = conversation.transaction.items || [];
+        // Tentar identificar qual item está sendo corrigido pelo contexto da mensagem
+        let corrected = false;
+        for (const item of items) {
+          const itemNorm = normalizeForMatch(item.name);
+          if (corrText.includes(itemNorm) || itemNorm.includes(corrText.split(/\s+/).slice(-2).join(' '))) {
+            item.quantity = correction.newQty;
+            corrected = true;
+            break;
+          }
+        }
+        // Se não conseguiu mapear item específico, corrigir todos com qty > newQty
+        if (!corrected && items.length > 0) {
+          for (const item of items) {
+            if (item.quantity > correction.newQty) {
+              item.quantity = correction.newQty;
+              corrected = true;
+            }
+          }
+        }
+        // Recalcular total
+        const amounts = calculateOrderAmounts(conversation.transaction, conversation);
+        conversation.transaction.total_amount = amounts.total;
+        anaDebug('CORRECTION_APPLIED', { type: 'QTY_UPDATE', newQty: correction.newQty, corrected, cart: cartSnapshot(conversation.transaction) });
+        return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
+      }
+      // GENERIC_ERROR: pedir detalhes sem sair do FINALIZANDO
+      if (no) {
+        return { nextState: STATES.FINALIZANDO, action: 'CORRECTION_REBUILD', missing: [] };
+      }
+      return { nextState: STATES.FINALIZANDO, action: 'CORRECTION_REBUILD', missing: [] };
     }
+
+    // "não" simples sem padrão de correção = pedir ajustes
+    if (no) return { nextState: STATES.FINALIZANDO, action: 'CORRECTION_REBUILD', missing: [] };
+
     // Consultation question while waiting confirmation: answer then re-ask
     if (i === INTENTS.CONSULTA || hasQuestion) return { nextState: STATES.FINALIZANDO, action: 'ANSWER_AND_CONFIRM', missing: [] };
     const hasOrderChange = Boolean(
@@ -1559,7 +1644,8 @@ function normalizeExtractedItemsWithCatalog(items, catalog) {
   for (const resolvedItem of resolved) {
     const key = normalizeForMatch(resolvedItem.desc_item);
     const current = merged.get(key);
-    if (current) current.quantity += toNumberOrOne(resolvedItem.quantity);
+    // MAX em vez de SOMA: duplicatas na mesma mensagem são redundância, não intenção de somar
+    if (current) current.quantity = Math.max(current.quantity, toNumberOrOne(resolvedItem.quantity));
     else {
       merged.set(key, {
         name: cleanText(resolvedItem.desc_item),
@@ -1817,16 +1903,39 @@ async function createAnaFoodOrder({ conversation, runtime, log }) {
     if (runtime.anafood.companyHeader) headers['X-Company-ID'] = runtime.anafood.companyHeader;
   }
 
+  // ── [ANA-DEBUG] ORDER_PAYLOAD ──────────────────────────────────────────
+  anaDebug('ORDER_PAYLOAD', {
+    endpoint: runtime.anafood.endpoint,
+    items: payload.order.items,
+    total: payload.order.total,
+    delivery_fee: payload.order.delivery_fee,
+    customer: payload.order.customer_name,
+    payment: payload.order.payment_method,
+    type: payload.order.type,
+  });
+
   try {
+    const startMs = Date.now();
     const response = await fetch(runtime.anafood.endpoint, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
     });
+    const elapsed = Date.now() - startMs;
     const data = await response.json().catch(() => ({}));
+
+    // ── [ANA-DEBUG] ORDER_RESPONSE ──────────────────────────────────────
+    anaDebug('ORDER_RESPONSE', {
+      status: response.status,
+      ok: response.ok,
+      elapsed_ms: elapsed,
+      body: data,
+    });
+
     if (!response.ok) {
       const err = new Error(data?.error || `HTTP ${response.status}`);
       err.details = data;
+      err.status = response.status;
       throw err;
     }
 
@@ -1835,11 +1944,20 @@ async function createAnaFoodOrder({ conversation, runtime, log }) {
       tenantId: runtime.id,
       phone: conversation.phone,
       order_id: conversation.transaction.order_id,
+      elapsed_ms: elapsed,
     });
     return { ok: true, order_id: conversation.transaction.order_id };
   } catch (err) {
+    // ── [ANA-DEBUG] ORDER_ERROR ──────────────────────────────────────────
+    anaDebug('ORDER_ERROR', {
+      err: err.message,
+      status: err.status || null,
+      details: err.details || null,
+      endpoint: runtime.anafood.endpoint,
+    });
     log('ERROR', 'Ana: erro ao criar pedido AnaFood', {
       err: err.message,
+      status: err.status || null,
       details: err.details || undefined,
       tenantId: runtime.id,
       phone: conversation.phone,
@@ -2728,6 +2846,8 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     }
     forceFillPendingField({ conversation, runtime, groupedText: normalizedText, extracted });
     extracted.items = normalizeExtractedItemsWithCatalog(extracted.items || [], conversation.catalog || []);
+    // ── BARREIRA DETERMINÍSTICA: se texto não tem número explícito > 1, forçar qty=1 ──
+    extracted.items = normalizeQuantityFromText(extracted.items, normalizedText);
     const textLower = String(normalizedText || '').toLowerCase();
     // INVERTIDO: por padrão tudo é SET (absoluto). "mais"/"adiciona"/"faltou" marca como incremental.
     const hasIncrementalHint = /\b(mais|adiciona|acrescenta|inclui|faltou|também|tambem|acrescentar)\b/i.test(textLower);
