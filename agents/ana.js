@@ -538,6 +538,12 @@ function appendCustomerMemory(customer, role, content, metadata = {}, state = ''
   }
 }
 
+function isNonInformativeFieldValue(value) {
+  const x = normalizeForMatch(value);
+  if (!x) return true;
+  return /\b(ja falei|jah falei|ja informei|ja passei|como ja falei|eu ja falei|mesmo de antes|o mesmo|isso ai|isso ae|isso mesmo)\b/.test(x);
+}
+
 function sanitizeAssistantReply({ reply, conversation, action }) {
   let text = String(reply || '').trim();
   if (!text) return '';
@@ -926,6 +932,7 @@ function mergeRestaurantTransaction(conv, extracted) {
     for (const [k, v] of Object.entries(extracted.address)) {
       const next = cleanText(v);
       if (!next) continue;
+      if (isNonInformativeFieldValue(next)) continue;
       if (cleanText(conv.transaction.address?.[k]) !== next) {
         conv.transaction.address[k] = next;
         markFieldChanged(conv, `address.${k}`);
@@ -1484,6 +1491,7 @@ function forceFillPendingField({ conversation, runtime, groupedText, extracted }
 
   const text = cleanText(groupedText);
   if (!text || text.includes('?')) return;
+  if (isNonInformativeFieldValue(text)) return;
   if (!extracted.address || typeof extracted.address !== 'object') extracted.address = {};
 
   if (pendingField === 'items') {
@@ -1672,13 +1680,7 @@ async function createOrderByProviderIfNeeded({ conversation, runtime, apiRequest
   if (conversation.transaction.order_id) return { ok: true, already: true };
 
   if (runtime.orderProvider === 'anafood') {
-    const ana = await createAnaFoodOrder({ conversation, runtime, log });
-    if (ana.ok) return ana;
-    if (runtime?.saipos?.production?.baseUrl || runtime?.saipos?.homologation?.baseUrl) {
-      log('INFO', 'Ana: fallback para SAIPOS apos falha no AnaFood', { tenantId: runtime.id, phone: conversation.phone, err: ana.error || '' });
-      return createSaiposOrder({ conversation, runtime, apiRequest, getEnvConfig, log });
-    }
-    return ana;
+    return createAnaFoodOrder({ conversation, runtime, log });
   }
 
   const saipos = await createSaiposOrder({ conversation, runtime, apiRequest, getEnvConfig, log });
@@ -1844,6 +1846,10 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   if (action === 'ANSWER_AND_CONFIRM') {
     const itemLines = (tx.items || []).map((it) => `• ${it.quantity}x ${it.name}`).join('\n') || '—';
     return `Respondendo rapidinho 😊\n\nSeu pedido até agora:\n${itemLines}\n\nPosso confirmar?`;
+  }
+
+  if (action === 'ASK_CONFIRMATION') {
+    return 'Está tudo certo para eu concluir o pedido? 😊';
   }
 
   if (action === 'ORDER_REVIEW') {
@@ -2472,6 +2478,11 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
         failText = `Não encontrei esses itens no cardápio: ${order.unresolved.join(', ')}. Pode informar exatamente como aparece no cardápio?`;
         conversation.state = STATES.COLLECTING_DATA;
         conversation.stateUpdatedAt = nowISO();
+      } else if (runtime.orderProvider === 'anafood') {
+        const err = cleanText(order.error || '');
+        failText = err
+          ? `Não consegui enviar para o gestor de pedidos AnaFood agora (${err}). Pode tentar novamente em instantes?`
+          : 'Não consegui enviar para o gestor de pedidos AnaFood agora. Pode tentar novamente em instantes?';
       }
       const sent = await sendWhatsAppMessage(conversation.phone, failText, runtime, conversation.remoteJid);
       if (sent && typeof onSend === 'function') {
