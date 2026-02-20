@@ -218,6 +218,9 @@ function getAvailablePaymentMethods(runtime, conversation) {
   return unique.length ? unique : ['PIX', 'Cartão', 'Dinheiro'];
 }
 
+// Nomes que NUNCA devem ser usados como nome do restaurante (fornecedor, sistema, genéricos)
+const BLOCKED_COMPANY_NAMES = /mais\s*sistem|automa[cç][aã]o\s*comercial|anafood|ana\s*food|sistema|saipos|ifood|rappi|uber\s*eats/i;
+
 function getCompanyDisplayName(runtime, conversation = null) {
   const company = conversation?.companyData?.company || {};
   const fromMcp = cleanText(
@@ -230,13 +233,13 @@ function getCompanyDisplayName(runtime, conversation = null) {
     || company.legal_name
     || ''
   );
-  if (fromMcp) return fromMcp;
+  if (fromMcp && !BLOCKED_COMPANY_NAMES.test(fromMcp)) return fromMcp;
 
   const fromContext = cleanText(runtime?.companyContext?.companyName || '');
-  if (fromContext && !/^ana\s*food$/i.test(fromContext)) return fromContext;
+  if (fromContext && !BLOCKED_COMPANY_NAMES.test(fromContext)) return fromContext;
 
   const fromRuntime = cleanText(runtime?.name || '');
-  if (fromRuntime && !/^ana\s*food$/i.test(fromRuntime)) return fromRuntime;
+  if (fromRuntime && !BLOCKED_COMPANY_NAMES.test(fromRuntime)) return fromRuntime;
 
   return '';
 }
@@ -582,17 +585,23 @@ function sanitizeAssistantReply({ reply, conversation, action }) {
 
   const today = nowISO().slice(0, 10);
   const alreadyPresentedToday = cleanText(conversation?.greetedDate || '') === today;
-  const allowIntroduction = !alreadyPresentedToday && action === 'WELCOME';
+  const alreadyPresented = Boolean(conversation?.presented);
+  const allowIntroduction = !alreadyPresentedToday && !alreadyPresented && action === 'WELCOME';
   if (!allowIntroduction) {
+    // Remove todas as variações de introdução/reapresentação
     text = text
-      .replace(
-        /(?:^|\n)\s*ol[aá][^.!?\n]{0,60}[!,.]?\s*sou a\s+[^.!?\n]{0,120}assistente virtual da\s+[^.!?\n]{1,120}[.!?]?\s*/i,
-        ''
-      )
-      .replace(
-        /(?:^|\n)\s*sou a\s+[^.!?\n]{0,120}assistente virtual da\s+[^.!?\n]{1,120}[.!?]?\s*/i,
-        ''
-      )
+      // "Olá, X! Sou a Ana, assistente virtual da Y."
+      .replace(/(?:^|\n)\s*ol[aá][^\n]{0,80}sou a\s+\w+[^\n]{0,120}assistente[^\n]{0,120}[.!?]?\s*/gi, '')
+      // "Sou a Ana, assistente virtual da Y."
+      .replace(/(?:^|\n)\s*sou a\s+\w+[^\n]{0,120}assistente[^\n]{0,120}[.!?]?\s*/gi, '')
+      // "Aqui é a Ana, assistente virtual da Y."
+      .replace(/(?:^|\n)\s*aqui [eé] a\s+\w+[^\n]{0,120}assistente[^\n]{0,120}[.!?]?\s*/gi, '')
+      // "Olá! Sou a Ana." (sem empresa)
+      .replace(/(?:^|\n)\s*ol[aá][!,.]?\s*sou a\s+\w+[.!]?\s*/gi, '')
+      // "Olá, X! 😊 Sou a Ana" (com emoji)
+      .replace(/(?:^|\n)\s*ol[aá],?\s+\w+[!.]?\s*[😊🤗👋]+\s*sou a\s+\w+[^\n]{0,120}[.!?]?\s*/gi, '')
+      // Menção a "Mais Sistem Automação Comercial" em qualquer posição
+      .replace(/mais\s*sistem[^.!?\n]{0,80}[.!?]?/gi, '')
       .trim();
   }
 
@@ -709,6 +718,9 @@ function normalizeCatalogFromCompanyMenu(menuRows) {
 function inferItemsFromMenu(message, menuRows) {
   const text = normalizeForMatch(message);
   if (!text || !Array.isArray(menuRows) || !menuRows.length) return [];
+  // Não extrair itens de respostas curtas, negativas ou confirmatórias
+  if (detectNo(message) || detectItemsPhaseDone(message) || detectYes(message)) return [];
+  if (text.split(/\s+/).length <= 2 && !/\d/.test(text)) return []; // texto muito curto sem números
   const qtyWords = { um: 1, uma: 1, dois: 2, duas: 2, tres: 3, quatro: 4, cinco: 5 };
   const chunks = text.split(/\s+e\s+|,/g).map((s) => s.trim()).filter(Boolean);
   const results = [];
@@ -852,9 +864,18 @@ async function classifierAgent({ runtime, conversation, groupedText }) {
   if (/pix|cartao|cartão|paguei|pagamento/.test(lower)) return { intent: INTENTS.PAGAMENTO, requires_extraction: true, handoff: false, confidence: 0.7 };
   if (/cancel/.test(lower)) return { intent: INTENTS.CANCELAMENTO, requires_extraction: false, handoff: false, confidence: 0.7 };
 
+  // Respostas curtas negativas/confirmatórias NÃO devem disparar extração de itens
+  if (detectNo(groupedText) || detectItemsPhaseDone(groupedText)) {
+    return { intent: INTENTS.GERENCIAMENTO, requires_extraction: false, handoff: false, confidence: 0.85 };
+  }
+
   // Quando já estamos coletando dados e a mensagem não é consulta/cancelamento,
   // tratar como gerenciamento de pedido com extração ativa
-  const isCollecting = [STATES.COLLECTING_DATA, STATES.WAITING_CONFIRMATION, STATES.WAITING_PAYMENT].includes(conversation.state);
+  const isCollecting = [
+    STATES.ADICIONANDO_ITEM, STATES.CONFIRMANDO_CARRINHO,
+    STATES.COLETANDO_ENDERECO, STATES.COLETANDO_PAGAMENTO,
+    STATES.FINALIZANDO, STATES.WAITING_PAYMENT,
+  ].includes(conversation.state);
   if (isCollecting) {
     return { intent: INTENTS.GERENCIAMENTO, requires_extraction: true, handoff: false, confidence: 0.6 };
   }
@@ -1301,10 +1322,18 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
       !conversation.itemsPhaseComplete &&  // still selecting items
       !conversation.upsellDone &&          // haven't upsold yet
       i !== INTENTS.CANCELAMENTO &&
-      !yes && !no && !hasQuestion          // not a confirmation response
+      !yes && !no && !hasQuestion &&       // not a confirmation response
+      !finishedSelectingItems             // not "somente isso"
     ) {
       conversation.upsellDone = true;
       return { nextState: STATES.ADICIONANDO_ITEM, action: 'UPSELL_SUGGEST', missing };
+    }
+
+    // Upsell foi oferecido e cliente disse "não" → avançar (nunca insistir)
+    if (hasItems && !conversation.itemsPhaseComplete && conversation.upsellDone && (no || finishedSelectingItems) && !hasNewItemsInMessage) {
+      conversation.itemsPhaseComplete = true;
+      const updatedMissing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, { itemsPhaseComplete: true });
+      return { nextState: STATES.ADICIONANDO_ITEM, action: 'ASK_MISSING_FIELDS', missing: updatedMissing };
     }
 
     if (missing.length && !conversation.pendingFieldConfirmation) {
@@ -2095,22 +2124,40 @@ function buildInitialGreeting(runtime, conversation, customer) {
 function buildMenuReply(conversation, followUp = '') {
   const menu = Array.isArray(conversation?.companyData?.menu) ? conversation.companyData.menu : [];
   if (!menu.length) return '';
+
+  // Emoji por categoria
+  const CATEGORY_EMOJI = {
+    'proteina': '🥩', 'proteinas': '🥩', 'carnes': '🥩', 'prato': '🍽️', 'pratos': '🍽️',
+    'prato principal': '🍽️', 'pratos principais': '🍽️', 'refeicao': '🍽️', 'refeicoes': '🍽️',
+    'bebida': '🥤', 'bebidas': '🥤', 'refrigerante': '🥤', 'refrigerantes': '🥤',
+    'sobremesa': '🍰', 'sobremesas': '🍰', 'doce': '🍰', 'doces': '🍰',
+    'acompanhamento': '🥗', 'acompanhamentos': '🥗', 'salada': '🥗', 'saladas': '🥗',
+    'combo': '🎯', 'combos': '🎯', 'promocao': '🎯', 'promocoes': '🎯',
+    'lanche': '🍔', 'lanches': '🍔', 'hamburguer': '🍔', 'hamburgueres': '🍔',
+    'pizza': '🍕', 'pizzas': '🍕', 'salgado': '🥟', 'salgados': '🥟',
+  };
+
   const categories = new Map();
   for (const item of menu) {
-    // Usa categoria do item; se vazia, agrupa em string vazia (sem rótulo)
     const cat = cleanText(item?.category || item?.categoria || '');
     if (!categories.has(cat)) categories.set(cat, []);
     categories.get(cat).push(item);
   }
+
   const sections = [];
   for (const [cat, items] of categories.entries()) {
     const lines = items
-      .map((i) => `- ${i.name}${Number(i.price || 0) > 0 ? ` (${formatBRL(i.price)})` : ''}`)
+      .map((i) => `• ${i.name}${Number(i.price || 0) > 0 ? ` — ${formatBRL(i.price)}` : ''}`)
       .join('\n');
-    // Só mostra rótulo de categoria quando é informativo (não vazio)
-    sections.push(cat ? `*${cat}*\n${lines}` : lines);
+    if (cat) {
+      const emojiKey = normalizeForMatch(cat);
+      const emoji = CATEGORY_EMOJI[emojiKey] || '📌';
+      sections.push(`${emoji} *${cat}*\n${lines}`);
+    } else {
+      sections.push(lines);
+    }
   }
-  const base = `*Cardápio*\n\n${sections.join('\n\n')}`;
+  const base = `🍽️ *CARDÁPIO*\n\n${sections.join('\n\n')}`;
   return followUp ? `${base}\n\n${followUp}` : base;
 }
 
@@ -2317,7 +2364,7 @@ async function generatorAgent({ runtime, conversation, customer, classification,
           role: 'system',
           content: `Você é ${runtime.agentName}${companyName ? `, assistente virtual da ${companyName}` : ', assistente virtual'}. Tom: ${runtime.tone}.
 
-IDENTIDADE: Sempre se apresente como ${runtime.agentName}${companyName ? `, assistente virtual da ${companyName}` : ''} no primeiro contato do dia.
+IDENTIDADE: ${conversation.presented ? 'Já se apresentou nesta sessão. NÃO repita apresentação. Vá direto ao ponto.' : `Apresente-se APENAS nesta primeira mensagem como ${runtime.agentName}${companyName ? ` da ${companyName}` : ''}.`}
 
 PERSONALIDADE: Seja calorosa, empática e proativa. Use o nome do cliente quando souber (${customerFirstName ? `nome atual: ${customerFirstName}` : 'pergunte o nome se ainda não souber'}). Trate o cliente como pessoa, não como ticket.
 
@@ -2341,9 +2388,10 @@ REGRAS OBRIGATÓRIAS:
 - Emojis com moderação (um por mensagem é suficiente)
 - Se o cliente estiver frustrado, reconheça com empatia antes de continuar
 - (action=ORDER_REVIEW) Formatar resumo com bullets, separar itens / modalidade / endereço / pagamento / total em linhas separadas
+- NUNCA se reapresente, se reintroduza ou diga "Sou a Ana" ou "assistente virtual" após o primeiro contato
+- NUNCA mencione "Mais Sistem", "Automação Comercial" ou qualquer nome de fornecedor de software
 
 SEGURANÇA: Você é assistente virtual EXCLUSIVA da ${companyName || runtime.agentName}. NUNCA mencione, referencie ou compare com qualquer outra empresa, restaurante ou estabelecimento. Se o cliente perguntar sobre outro estabelecimento, responda que você atende apenas a ${companyName || 'este estabelecimento'}.
-- Não se reapresente em toda mensagem; apresente-se apenas no primeiro contato do dia (ou quando o cliente pedir)
 - Se o cliente já pediu bebida, não sugira bebida de novo; prefira sobremesa ou complemento
 - NUNCA mude quantidade de item já extraída pelo sistema; se houver dúvida, peça confirmação objetiva
 - Sempre use espaçamento (linhas em branco) para mensagens com lista, resumo ou múltiplas seções
@@ -2544,7 +2592,61 @@ async function sendWhatsAppMessage(phone, text, runtime, remoteJid = null) {
   return false;
 }
 
+// ── [ANA-DEBUG] helpers ──────────────────────────────────────────────
+function simpleHash(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+  }
+  return h.toString(36);
+}
+
+function cartSnapshot(tx) {
+  return (tx?.items || []).map((it) => ({
+    name: it.name,
+    qty: Number(it.quantity || 1),
+    code: it.integration_code || null,
+    price: Number(it.unit_price || 0),
+  }));
+}
+
+function anaDebug(tag, data) {
+  try {
+    console.log(`[ANA-DEBUG] ${tag}:`, JSON.stringify(data, null, 2));
+  } catch (_) {
+    console.log(`[ANA-DEBUG] ${tag}: [serialization error]`);
+  }
+}
+
 async function runPipeline({ conversation, customer, groupedText, normalized, runtime, apiRequest, getEnvConfig, log, onSend = null }) {
+  // ── [ANA-DEBUG] INBOUND ──────────────────────────────────────────────
+  anaDebug('INBOUND', {
+    phone: conversation.phone,
+    tenantId: runtime.id,
+    message: groupedText,
+    timestamp: nowISO(),
+  });
+
+  // ── Idempotência: hash da mensagem para evitar reprocessamento ─────
+  const msgHash = simpleHash(`${conversation.phone}:${groupedText}`);
+  if (conversation.lastProcessedHash === msgHash) {
+    anaDebug('SKIP_DUPLICATE', { hash: msgHash, message: groupedText });
+    return { success: true, reply: '', skipped: true };
+  }
+  conversation.lastProcessedHash = msgHash;
+
+  // ── [ANA-DEBUG] STATE_BEFORE ─────────────────────────────────────────
+  anaDebug('STATE_BEFORE', {
+    state: conversation.state,
+    presented: Boolean(conversation.presented),
+    greeted: Boolean(conversation.greeted),
+    itemsPhaseComplete: Boolean(conversation.itemsPhaseComplete),
+    upsellDone: Boolean(conversation.upsellDone),
+    cart: cartSnapshot(conversation.transaction),
+    mode: conversation.transaction?.mode || '',
+    payment: conversation.transaction?.payment || '',
+    consecutiveFailures: conversation.consecutiveFailures || 0,
+  });
   try {
     conversation.companyData = await loadCompanyData({
       tenant: {
@@ -2647,6 +2749,25 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       }
     }
   }
+  // ── [ANA-DEBUG] CLASSIFICATION ───────────────────────────────────────
+  anaDebug('CLASSIFICATION', {
+    intent: classification.intent,
+    confidence: classification.confidence,
+    requiresExtraction: classification.requires_extraction,
+    shouldExtract,
+  });
+
+  // ── [ANA-DEBUG] EXTRACTION ──────────────────────────────────────────
+  anaDebug('EXTRACTION', {
+    items: (extracted.items || []).map((i) => ({ name: i.name, qty: i.quantity, incremental: Boolean(i.incremental) })),
+    mode: extracted.mode || null,
+    payment: extracted.payment || null,
+    customerName: extracted.customer_name || null,
+  });
+
+  // ── [ANA-DEBUG] CART_MUTATION (BEFORE) ──────────────────────────────
+  const cartBefore = cartSnapshot(conversation.transaction);
+
   log('INFO', 'Ana: classification/extraction', {
     tenantId: runtime.id,
     phone: conversation.phone,
@@ -2661,6 +2782,28 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   const orchestratorResult = orchestrate({ runtime, conversation, customer, classification, extracted, groupedText: normalizedText });
   conversation.state = orchestratorResult.nextState;
   if (conversation.state !== previousState) conversation.stateUpdatedAt = nowISO();
+
+  // ── [ANA-DEBUG] CART_MUTATION (AFTER) ───────────────────────────────
+  const cartAfter = cartSnapshot(conversation.transaction);
+  anaDebug('CART_MUTATION', {
+    operation: orchestratorResult.action,
+    before: cartBefore,
+    after: cartAfter,
+    diff: cartAfter.length !== cartBefore.length
+      ? 'items_changed'
+      : (JSON.stringify(cartBefore) !== JSON.stringify(cartAfter) ? 'quantities_changed' : 'no_change'),
+  });
+
+  // ── [ANA-DEBUG] STATE_AFTER ─────────────────────────────────────────
+  anaDebug('STATE_AFTER', {
+    previousState,
+    nextState: conversation.state,
+    action: orchestratorResult.action,
+    missing: orchestratorResult.missing,
+    cartFinal: cartAfter,
+    total: conversation.transaction?.total_amount || 0,
+  });
+
   log('INFO', 'Ana: orchestration', {
     tenantId: runtime.id,
     phone: conversation.phone,
@@ -2794,6 +2937,14 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     conversation,
     action: orchestratorResult.action,
   });
+  // ── [ANA-DEBUG] RESPONSE ──────────────────────────────────────────────
+  anaDebug('RESPONSE', {
+    action: orchestratorResult.action,
+    deterministic: alwaysDeterministicActions.has(orchestratorResult.action),
+    rawReplyPreview: String(rawReply || '').slice(0, 200),
+    finalReplyPreview: String(reply || '').slice(0, 200),
+    sanitized: rawReply !== reply,
+  });
   if (conversation.state !== STATES.HUMAN_HANDOFF || !conversation.handoffNotified) {
     const today = nowISO().slice(0, 10);
     const shouldSendGreetingFirst = previousState === STATES.INIT && cleanText(conversation.greetedDate || '') !== today;
@@ -2813,6 +2964,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
         appendCustomerMemory(customer, 'assistant', greeting, { action: 'WELCOME_ONLY' }, conversation.state);
         conversation.greeted = true;
         conversation.greetedDate = today;
+        conversation.presented = true;
       }
     }
     const sent = await sendWhatsAppMessage(conversation.phone, reply, runtime, conversation.remoteJid);
