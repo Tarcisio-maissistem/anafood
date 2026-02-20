@@ -1968,6 +1968,16 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   return 'Pode me explicar melhor? Estou aqui pra ajudar 😊';
 }
 
+function buildInitialGreeting(runtime, conversation, customer) {
+  const firstName = cleanText(customer?.name || conversation?.transaction?.customer_name || '').split(' ')[0] || '';
+  const companyName = getCompanyDisplayName(runtime, conversation);
+  const who = firstName ? `Olá, ${firstName}!` : 'Olá!';
+  const identity = companyName
+    ? `Aqui é a ${runtime?.agentName || 'Ana'}, assistente virtual da ${companyName}.`
+    : `Aqui é a ${runtime?.agentName || 'Ana'}.`;
+  return `${who}\n\n${identity}`;
+}
+
 function buildMenuReply(conversation, followUp = '') {
   const menu = Array.isArray(conversation?.companyData?.menu) ? conversation.companyData.menu : [];
   if (!menu.length) return '';
@@ -2106,6 +2116,13 @@ function buildContextualAnswer(conversation, userMessage = '') {
 
   if (/\b(valor|pre[cç]o|quanto|marmita grande|marmita pequena|card[aá]pio|cardapio|menu)\b/.test(text)) {
     if (!menu.length) return 'No momento não encontrei o cardápio cadastrado no banco de dados.';
+    if (/\b(card[aá]pio|cardapio|menu)\b/.test(text)) {
+      const full = menu
+        .filter((i) => i.available !== false)
+        .map((i) => `• ${i.name}${Number(i.price || 0) > 0 ? ` (${formatBRL(i.price)})` : ''}`)
+        .join('\n');
+      return `Cardápio de hoje:\n\n${full}`;
+    }
     const sizeHint = text.includes('grande') ? 'grande' : (text.includes('pequena') ? 'pequena' : '');
     if (sizeHint) {
       const item = menu.find((i) => String(i?.name || '').toLowerCase().includes(sizeHint));
@@ -2142,7 +2159,7 @@ function buildContextualAnswer(conversation, userMessage = '') {
   return '';
 }
 
-async function generatorAgent({ runtime, conversation, customer, classification, orchestratorResult, groupedText }) {
+async function generatorAgent({ runtime, conversation, customer, classification, orchestratorResult, groupedText, contextualHint = '' }) {
   const recentContext = Array.isArray(customer?.recentContext) ? customer.recentContext.slice(-MAX_PROMPT_MEMORY_ITEMS) : [];
   const recentContextForPrompt = recentContext.map((m) => {
     const who = m.role === 'assistant' ? 'Agente' : 'Cliente';
@@ -2158,6 +2175,7 @@ async function generatorAgent({ runtime, conversation, customer, classification,
     missing: orchestratorResult.missing || [],
     transaction: conversation.transaction,
     userMessage: groupedText || '',
+    contextualHint: cleanText(contextualHint || ''),
     customerProfile: {
       phone: conversation.phone,
       contactName: conversation.contactName || '',
@@ -2211,6 +2229,9 @@ REGRAS OBRIGATÓRIAS:
 - (action=ORDER_REVIEW) Formatar resumo com bullets, separar itens / modalidade / endereço / pagamento / total em linhas separadas
 - Não se reapresente em toda mensagem; apresente-se apenas no primeiro contato do dia (ou quando o cliente pedir)
 - Se o cliente já pediu bebida, não sugira bebida de novo; prefira sobremesa ou complemento
+- NUNCA mude quantidade de item já extraída pelo sistema; se houver dúvida, peça confirmação objetiva
+- Sempre use espaçamento (linhas em branco) para mensagens com lista, resumo ou múltiplas seções
+- Se "contextualHint" vier preenchido, use esse conteúdo como base da resposta final
 
 ESTILO: Use linguagem natural brasileira. Evite palavras robóticas. Prefira "já anotei", "pode deixar", "tudo certo".
 No ORDER_REVIEW use quebras de linha reais entre seções — não coloque tudo numa linha só.
@@ -2247,8 +2268,11 @@ ${runtime.customPrompt ? `\nINSTRUÇÕES ESPECÍFICAS DO ESTABELECIMENTO:\n${run
       ],
     });
     const text = cleanText(c.choices?.[0]?.message?.content || '');
-    return text || fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing, conversation);
+    if (text) return text;
+    if (String(contextualHint || '').trim()) return String(contextualHint || '').trim();
+    return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing, conversation);
   } catch (_) {
+    if (String(contextualHint || '').trim()) return String(contextualHint || '').trim();
     return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing, conversation);
   }
 }
@@ -2470,7 +2494,13 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     const currentItems = Array.isArray(extracted.items) ? extracted.items : [];
     const hasJoinedItem = currentItems.some((i) => /\s+e\s+/.test(String(i?.name || '').toLowerCase()));
     if (inferred.length) {
-      const keepCurrent = currentItems.filter((i) => !/\s+e\s+/.test(String(i?.name || '').toLowerCase()));
+      const inferredNorms = inferred.map((i) => normalizeForMatch(i.name));
+      const keepCurrent = currentItems.filter((i) => {
+        const n = normalizeForMatch(i?.name || '');
+        if (!n) return false;
+        if (/\s+e\s+/.test(String(i?.name || '').toLowerCase())) return false;
+        return !inferredNorms.some((x) => x === n || x.includes(n) || n.includes(x));
+      });
       extracted.items = [...keepCurrent, ...inferred];
     } else if (hasJoinedItem) {
       extracted.items = currentItems.filter((i) => !/\s+e\s+/.test(String(i?.name || '').toLowerCase()));
@@ -2603,10 +2633,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     conversation.consecutiveFailures = 0;
   }
 
-  const strictDeterministicActions = new Set([
-    'ASK_MISSING_FIELDS',
-    'ASK_FIELD_CONFIRMATION',
-    'ASK_REPEAT_LAST_ORDER',
+  const alwaysDeterministicActions = new Set([
     'ORDER_REVIEW',
     'PAYMENT_REMINDER',
     'FLOW_CANCELLED',
@@ -2615,69 +2642,59 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     'PAYMENT_CONFIRMED',
     'BLOCK_NEW_ORDER_UNTIL_FINISH',
     'POST_CONFIRMATION_SUPPORT',
+    'HUMAN_HANDOFF',
   ]);
-  const legacyDeterministicActions = new Set([
-    ...Array.from(strictDeterministicActions),
-    'ANSWER_AND_RESUME',
-    'ANSWER_AND_RESUME_CONFIRM',
-    'ANSWER_AND_RESUME_REPEAT',
-    'ASK_CONFIRMATION',
-    'REQUEST_ADJUSTMENTS',
-    'UPSELL_SUGGEST',
-    'ANSWER_AND_CONFIRM',
-  ]);
-  const deterministicActions = runtime.llmFirstResponse ? strictDeterministicActions : legacyDeterministicActions;
-
-  const rawReply = orchestratorResult.action === 'WELCOME'
-    ? (() => {
-      const firstMissing = (orchestratorResult.missing || [])[0];
-      const hasPendingValue = firstMissing === 'items'
-        ? Array.isArray(conversation.transaction.items) && conversation.transaction.items.length > 0
-        : String(firstMissing || '').startsWith('address.')
-          ? Boolean(cleanText(conversation.transaction.address?.[String(firstMissing).slice('address.'.length)]))
-          : Boolean(cleanText(conversation.transaction[firstMissing]));
-      const followUpAction = hasPendingValue ? 'ASK_FIELD_CONFIRMATION' : 'ASK_MISSING_FIELDS';
-      const followUp = fallbackText(runtime, followUpAction, conversation.transaction, orchestratorResult.missing || [], conversation);
-      // Saudação com identidade da empresa e nome do cliente
-      const agentN = runtime.agentName || 'Ana';
-      const companyN = getCompanyDisplayName(runtime, conversation);
-      const clientFirstName = cleanText(customer?.name || conversation.transaction?.customer_name || '').split(' ')[0];
-      const personalGreeting = clientFirstName ? `Olá, ${clientFirstName}! ` : 'Olá! ';
-      const identity = companyN ? `Aqui é a ${agentN}, assistente virtual da ${companyN} 😊` : `Aqui é a ${agentN} 😊`;
-      const greetingBase = `${personalGreeting}${identity}`;
-      return followUp ? `${greetingBase}\n\n${followUp}`.trim() : greetingBase;
-    })()
-    : (() => {
-      const text = normalized.normalizedText || groupedText;
-      const asksMenu = /\b(card[aá]pio|cardapio|menu|itens de hoje)\b/i.test(text || '');
-      if (asksMenu) {
-        const followUp = fallbackText(runtime, 'ASK_MISSING_FIELDS', conversation.transaction, orchestratorResult.missing || [], conversation);
-        const deterministicMenu = buildMenuReply(conversation, followUp);
-        if (deterministicMenu) return deterministicMenu;
-      }
-      const contextualActions = new Set(['ANSWER_AND_RESUME', 'ANSWER_AND_RESUME_CONFIRM', 'ANSWER_AND_RESUME_REPEAT', 'ANSWER_AND_CONFIRM']);
-      if (contextualActions.has(orchestratorResult.action)) {
-        const contextual = buildContextualAnswer(conversation, text);
-        if (contextual) {
-          let followAction = 'ASK_MISSING_FIELDS';
-          if (orchestratorResult.action === 'ANSWER_AND_RESUME_CONFIRM') followAction = 'ASK_FIELD_CONFIRMATION';
-          else if (orchestratorResult.action === 'ANSWER_AND_RESUME_REPEAT') followAction = 'ASK_REPEAT_LAST_ORDER';
-          else if (orchestratorResult.action === 'ANSWER_AND_CONFIRM') followAction = 'ASK_CONFIRMATION';
-          const follow = fallbackText(runtime, followAction, conversation.transaction, orchestratorResult.missing || [], conversation);
-          return `${contextual}\n\n${follow}`.trim();
-        }
-      }
-      if (deterministicActions.has(orchestratorResult.action)) {
-        return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing || [], conversation);
-      }
-      return null;
-    })() || await generatorAgent({ runtime, conversation, customer, classification, orchestratorResult, groupedText: normalized.normalizedText || groupedText });
+  const text = normalized.normalizedText || groupedText;
+  let contextualHint = '';
+  const contextualActions = new Set(['ANSWER_AND_RESUME', 'ANSWER_AND_RESUME_CONFIRM', 'ANSWER_AND_RESUME_REPEAT', 'ANSWER_AND_CONFIRM']);
+  if (contextualActions.has(orchestratorResult.action)) {
+    const contextual = buildContextualAnswer(conversation, text);
+    if (contextual) {
+      let followAction = 'ASK_MISSING_FIELDS';
+      if (orchestratorResult.action === 'ANSWER_AND_RESUME_CONFIRM') followAction = 'ASK_FIELD_CONFIRMATION';
+      else if (orchestratorResult.action === 'ANSWER_AND_RESUME_REPEAT') followAction = 'ASK_REPEAT_LAST_ORDER';
+      else if (orchestratorResult.action === 'ANSWER_AND_CONFIRM') followAction = 'ASK_CONFIRMATION';
+      const follow = fallbackText(runtime, followAction, conversation.transaction, orchestratorResult.missing || [], conversation);
+      contextualHint = `${contextual}\n\n${follow}`.trim();
+    }
+  }
+  const rawReply = alwaysDeterministicActions.has(orchestratorResult.action)
+    ? fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing || [], conversation)
+    : (await generatorAgent({
+      runtime,
+      conversation,
+      customer,
+      classification,
+      orchestratorResult,
+      groupedText: text,
+      contextualHint,
+    })) || fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing || [], conversation);
   const reply = sanitizeAssistantReply({
     reply: rawReply,
     conversation,
     action: orchestratorResult.action,
   });
   if (conversation.state !== STATES.HUMAN_HANDOFF || !conversation.handoffNotified) {
+    const today = nowISO().slice(0, 10);
+    const shouldSendGreetingFirst = previousState === STATES.INIT && cleanText(conversation.greetedDate || '') !== today;
+    if (shouldSendGreetingFirst) {
+      const greeting = buildInitialGreeting(runtime, conversation, customer);
+      const sentGreeting = await sendWhatsAppMessage(conversation.phone, greeting, runtime, conversation.remoteJid);
+      if (sentGreeting && typeof onSend === 'function') {
+        onSend({
+          phone: conversation.phone,
+          remoteJid: conversation.remoteJid || null,
+          text: greeting,
+          instance: runtime.evolution.instance || null,
+        });
+      }
+      if (sentGreeting) {
+        appendMessage(conversation, 'assistant', greeting, { action: 'WELCOME_ONLY' });
+        appendCustomerMemory(customer, 'assistant', greeting, { action: 'WELCOME_ONLY' }, conversation.state);
+        conversation.greeted = true;
+        conversation.greetedDate = today;
+      }
+    }
     const sent = await sendWhatsAppMessage(conversation.phone, reply, runtime, conversation.remoteJid);
     if (sent && typeof onSend === 'function') {
       onSend({
