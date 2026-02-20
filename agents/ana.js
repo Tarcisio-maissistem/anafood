@@ -593,7 +593,7 @@ async function extractorAgent({ runtime, groupedText }) {
 
   const nameMatch = groupedText.match(/(?:meu nome (?:é|e)|sou|chamo-me|me chamo)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]{2,60})/i);
   if (nameMatch) out.customer_name = cleanText(nameMatch[1]);
-  if (/sem observa|sem complemento|sem adicional/i.test(lower)) out.notes = 'Sem observacoes';
+  if (/sem observa|sem complemento|sem adicional/i.test(lower)) out.notes = 'Sem observações';
   const obsMatch = groupedText.match(/(?:obs|observa(?:ç|c)[aã]o|complemento)\s*[:\-]\s*(.{3,200})/i);
   if (obsMatch) out.notes = cleanText(obsMatch[1]);
 
@@ -641,8 +641,16 @@ function mergeRestaurantTransaction(conv, extracted) {
         const before = Number(existing.quantity || 0);
         existing.quantity += toNumberOrOne(item.quantity);
         if (Number(existing.quantity || 0) !== before) changed = true;
+        // Preenche código e preço se ainda estavam vazios (item normalizado com catálogo)
+        if (!existing.integration_code && item.integration_code) existing.integration_code = String(item.integration_code);
+        if (!existing.unit_price && Number(item.unit_price || 0)) existing.unit_price = Number(item.unit_price);
       } else {
-        conv.transaction.items.push({ name, quantity: toNumberOrOne(item.quantity), integration_code: null, unit_price: null });
+        conv.transaction.items.push({
+          name,
+          quantity: toNumberOrOne(item.quantity),
+          integration_code: item.integration_code || null,
+          unit_price: Number(item.unit_price || 0) || null,
+        });
         changed = true;
       }
     }
@@ -691,7 +699,7 @@ function fieldConfirmationLabel(field) {
   const labels = {
     customer_name: 'nome',
     items: 'itens do pedido',
-    notes: 'observacoes do pedido',
+    notes: 'observações do pedido',
     mode: 'tipo de entrega',
     payment: 'forma de pagamento',
     'address.street_name': 'rua',
@@ -1343,7 +1351,7 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
 
   if (action === 'ASK_FIELD_CONFIRMATION') {
     const field = (missing || [])[0];
-    if (!field) return `${hi}pode confirmar esse dado?`;
+    if (!field) return 'Pode confirmar esse dado?';
     const label = fieldConfirmationLabel(field);
     const value = fieldConfirmationValue(tx, field);
     return `Só confirmar: ${label} é *${value}*? 😊`;
@@ -1357,18 +1365,18 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
       : 'PIX ou cartão';
     const map = {
       customer_name: 'Qual é o seu nome?',
-      items: `${hi}quais itens você gostaria de pedir?`,
-      notes: 'Tem alguma observação para o pedido? Se não tiver, é só responder "sem observações" 😊',
-      mode: `${hi}seu pedido é para retirada ou delivery?`,
-      payment: `${hi}qual forma de pagamento prefere: ${payments}?`,
+      items: 'O que você vai querer hoje? 😊',
+      notes: 'Tem alguma observação para o pedido? Se não tiver, é só dizer "sem observações".',
+      mode: 'É pra retirada ou entrega?',
+      payment: `Como prefere pagar? ${payments}`,
       'address.street_name': 'Qual é a rua para entrega?',
-      'address.street_number': 'Qual é o número do endereço?',
+      'address.street_number': 'Qual é o número?',
       'address.neighborhood': 'E o bairro?',
       'address.city': 'Qual é a cidade?',
-      'address.state': 'Qual é o estado (UF)?',
-      'address.postal_code': 'Pode me passar o CEP? (somente números)',
+      'address.state': 'E o estado (UF)?',
+      'address.postal_code': 'Me passa o CEP também? (só os números)',
     };
-    return map[first] || `${hi}me passa mais um dado para continuar com o pedido.`;
+    return map[first] || 'Me passa mais um dado para continuar 😊';
   }
 
   if (action === 'ANSWER_AND_RESUME') {
@@ -1402,14 +1410,14 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
       .slice(0, 3)
       .map((m) => m.name);
     const suggestionLine = extras.length
-      ? `Deseja acrescentar algo? Temos também ${extras.join(', ')} 😋`
-      : 'Gostaria de acrescentar mais algum item ao pedido?';
-    return `${hi}anotei:\n${itemLines}\n\n${suggestionLine}`;
+      ? `Quer acrescentar mais alguma coisa? Temos também ${extras.join(', ')} 😋`
+      : 'Quer acrescentar mais alguma coisa?';
+    return `Anotado! ✅\n${itemLines}\n\n${suggestionLine}`;
   }
 
   if (action === 'ANSWER_AND_CONFIRM') {
     const itemLines = (tx.items || []).map((it) => `• ${it.quantity}x ${it.name}`).join('\n') || '—';
-    return `${hi}respondendo rapidinho e voltando ao seu pedido 😊\n\nItens:\n${itemLines}\n\nPosso confirmar o pedido?`;
+    return `Respondendo rapidinho 😊\n\nSeu pedido até agora:\n${itemLines}\n\nPosso confirmar?`;
   }
 
   if (action === 'ORDER_REVIEW') {
@@ -1419,15 +1427,15 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
     }).join('\n') || '—';
     const paymentMap = { PIX: 'PIX', CARD: 'Cartão', CASH: 'Dinheiro' };
     const payment = paymentMap[tx.payment] || tx.payment || '—';
-    const mode = tx.mode === 'TAKEOUT' ? 'Retirada no local' : 'Delivery';
+    const mode = tx.mode === 'TAKEOUT' ? 'Retirada no local' : 'Entrega';
     let addrLine = '';
     if (tx.mode === 'DELIVERY' && cleanText(tx.address?.street_name)) {
       const addrParts = [tx.address.street_name, tx.address.street_number, tx.address.neighborhood, tx.address.city].filter(Boolean);
       addrLine = `\nEndereço: ${addrParts.join(', ')}`;
     }
     const total = (tx.items || []).reduce((sum, it) => sum + (Number(it.unit_price || 0) * Number(it.quantity || 1)), 0);
-    const totalLine = total > 0 ? `\n\nTotal: ${formatBRL(total / 100)}` : '';
-    return `${hi}aqui está o resumo do pedido 👇\n\nItens:\n${items}\n\nModalidade: ${mode}${addrLine}\nPagamento: ${payment}${totalLine}\n\nEstá tudo certo? 😊`;
+    const totalLine = total > 0 ? `\n*Total: ${formatBRL(total / 100)}*` : '';
+    return `Aqui está o resumo do seu pedido 👇\n\n*Itens:*\n${items}\n\n*Modalidade:* ${mode}${addrLine}\n*Pagamento:* ${payment}${totalLine}\n\nEstá tudo certo? 😊`;
   }
 
   if (action === 'CREATE_ORDER_AND_WAIT_PAYMENT') {
@@ -1442,30 +1450,32 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   }
 
   if (action === 'PAYMENT_REMINDER') {
-    return `${hi}ainda aguardo a confirmação do pagamento. Assim que pagar, é só me avisar 😊`;
+    return 'Ainda aguardando a confirmação do pagamento. Assim que pagar, é só me avisar 😊';
   }
 
   if (action === 'REQUEST_ADJUSTMENTS') {
-    return `${hi}claro! O que você gostaria de alterar no pedido?`;
+    return 'Claro! O que você quer ajustar no pedido?';
   }
 
   if (action === 'FLOW_CANCELLED') {
-    return `Tudo bem, ${firstName || 'tudo bem'}! Pedido cancelado. Se quiser fazer um novo pedido é só me chamar 😊`;
+    return 'Tudo bem! Pedido cancelado. Se quiser recomeçar é só me chamar 😊';
   }
 
   if (action === 'BLOCK_NEW_ORDER_UNTIL_FINISH') {
-    return `${hi}ainda tenho um pedido em andamento para você. Me avisa quando quiser e eu te ajudo com um novo 😊`;
+    return 'Ainda tenho um pedido em andamento. Me avisa quando terminar e faço um novo pra você 😊';
   }
 
   if (action === 'HUMAN_HANDOFF') {
-    return `Claro, ${firstName || 'claro'}! Vou te transferir para um atendente humano agora mesmo. Um instante 😊`;
+    return firstName
+      ? `Claro, ${firstName}! Vou te passar para um atendente agora. Um instante 😊`
+      : 'Claro! Vou te passar para um atendente agora. Um instante 😊';
   }
 
   if (action === 'END_CONVERSATION') {
     return `Até logo! Se precisar é só chamar 😊`;
   }
 
-  return `${hi}pode me explicar melhor? Estou aqui para ajudar 😊`;
+  return 'Pode me explicar melhor? Estou aqui pra ajudar 😊';
 }
 
 function buildMenuReply(conversation, followUp = '') {
@@ -1473,16 +1483,21 @@ function buildMenuReply(conversation, followUp = '') {
   if (!menu.length) return '';
   const categories = new Map();
   for (const item of menu) {
-    const cat = cleanText(item?.category || 'Cardapio');
+    // Usa categoria do item; se vazia, agrupa em string vazia (sem rótulo)
+    const cat = cleanText(item?.category || item?.categoria || '');
     if (!categories.has(cat)) categories.set(cat, []);
     categories.get(cat).push(item);
   }
   const sections = [];
   for (const [cat, items] of categories.entries()) {
-    const top = items.slice(0, 6).map((i) => `- ${i.name}${Number(i.price || 0) > 0 ? ` (${formatBRL(i.price)})` : ''}`).join('\n');
-    sections.push(`*${cat}*\n${top}`);
+    const lines = items
+      .slice(0, 10)
+      .map((i) => `- ${i.name}${Number(i.price || 0) > 0 ? ` (${formatBRL(i.price)})` : ''}`)
+      .join('\n');
+    // Só mostra rótulo de categoria quando é informativo (não vazio)
+    sections.push(cat ? `*${cat}*\n${lines}` : lines);
   }
-  const base = `*Cardápio de hoje*\n\n${sections.slice(0, 3).join('\n\n')}`;
+  const base = `*Cardápio*\n\n${sections.join('\n\n')}`;
   return followUp ? `${base}\n\n${followUp}` : base;
 }
 
@@ -1723,7 +1738,12 @@ async function sendWhatsAppMessage(phone, text, runtime, remoteJid = null) {
   const { apiUrl, apiKey } = runtime.evolution;
   if (!apiUrl || !apiKey) return false;
 
-  const safeText = cleanText(text);
+  // Não usar cleanText aqui — ele colapsa \n e destroça a formatação no WhatsApp.
+  // Apenas normalizar espaços horizontais, limitar newlines consecutivos e aparar.
+  const safeText = String(text || '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
   if (!safeText) return false;
 
   const rawPhone = String(phone || '').trim();
@@ -1956,7 +1976,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       conversation.consecutiveFailures = (conversation.consecutiveFailures || 0) + 1;
       conversation.state = STATES.COLLECTING_DATA;
       conversation.stateUpdatedAt = nowISO();
-      const failText = `Nao encontrei esses itens no cardapio: ${preValidation.unresolved.join(', ')}. Pode informar exatamente como aparece no cardapio?`;
+      const failText = `Não encontrei esses itens no cardápio: ${preValidation.unresolved.join(', ')}. Pode informar exatamente como aparece no cardápio?`;
       const sent = await sendWhatsAppMessage(conversation.phone, failText, runtime, conversation.remoteJid);
       if (sent && typeof onSend === 'function') {
         onSend({
@@ -1984,7 +2004,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       conversation.consecutiveFailures = (conversation.consecutiveFailures || 0) + 1;
       let failText = 'Tive um problema ao registrar o pedido no sistema.';
       if (Array.isArray(order.unresolved) && order.unresolved.length) {
-        failText = `Nao encontrei esses itens no cardapio: ${order.unresolved.join(', ')}. Pode informar exatamente como aparece no cardapio?`;
+        failText = `Não encontrei esses itens no cardápio: ${order.unresolved.join(', ')}. Pode informar exatamente como aparece no cardápio?`;
         conversation.state = STATES.COLLECTING_DATA;
         conversation.stateUpdatedAt = nowISO();
       }
@@ -2058,7 +2078,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       const personalGreeting = clientFirstName ? `Olá, ${clientFirstName}! ` : 'Olá! ';
       const identity = companyN ? `Aqui é a ${agentN} do ${companyN} 😊` : `Aqui é a ${agentN} 😊`;
       const greetingBase = `${personalGreeting}${identity}`;
-      return followUp ? `${greetingBase} ${followUp}`.trim() : greetingBase;
+      return followUp ? `${greetingBase}\n\n${followUp}`.trim() : greetingBase;
     })()
     : (() => {
       const text = normalized.normalizedText || groupedText;
