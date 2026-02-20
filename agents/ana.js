@@ -466,8 +466,9 @@ function extractItemsFromFreeText(text) {
 
   for (let chunk of chunks) {
     if (/^(oi|ola|olá|bom dia|boa tarde|boa noite)$/i.test(chunk)) continue;
-    if (/\b(rua|av(?:enida)?|bairro|cep|numero|n[úu]mero|pix|cart[aã]o|retirada|delivery)\b/i.test(chunk)) continue;
+    if (/\b(rua|av(?:enida)?|bairro|cep|numero|n[úu]mero|pix|cart[aã]o|retirada|delivery|dinheiro|especie|espécie|cash)\b/i.test(chunk)) continue;
     if (/\b(horario|horário|funcionamento|endereco|endereço|taxa|taxas|cardapio|cardápio|preço|preco|quanto custa|quanto fica|como funciona|qual é|qual e|quais s[aã]o|informacao|informação)\b/i.test(chunk)) continue;
+    if (chunk.trim().endsWith('?')) continue; // perguntas não são itens
 
     let quantity = 1;
     const qtyPrefix = chunk.match(/^\s*(\d+|um|uma|dois|duas|tres|quatro|cinco)\b/i);
@@ -531,6 +532,10 @@ async function classifierAgent({ runtime, conversation, groupedText }) {
   if (/\b(horario|funcionamento|endereco|endereço|pagamento|formas de pagamento|valor|pre[cç]o|card[aá]pio|cardapio|menu)\b/.test(lower)) {
     return { intent: INTENTS.CONSULTA, requires_extraction: false, handoff: false, confidence: 0.95 };
   }
+  // "Tem X?" = pergunta de disponibilidade no cardápio, não pedido
+  const isAvailabilityQuestion = /^(tem\s|existe\s|vocês?\s+tem\b|vocês?\s+têm\b)/.test(lower.trim())
+    || (/\b(tem|existe|há|vocês?\s+têm)\b/.test(lower) && /\?/.test(groupedText));
+  if (isAvailabilityQuestion) return { intent: INTENTS.CONSULTA, requires_extraction: false, handoff: false, confidence: 0.9 };
   // Sinais claros de pedido (inclui nomes de alimentos comuns)
   const hasOrderSignal = /quero|quer(ia|o)\b|pedi(do|r)|comprar|marmita|pizza|lanche|hamburguer|hambúrguer|burger|frango|carne|prato|suco|refri|coca|cerveja|agua|acai|açaí|esfiha|pastel|batata|sobremesa|salada|wrap|porção|porcao|combo|tapioca|coxinha|empada|torta|bolo|sorvete|salgado|sanduiche|sanduíche|x-/.test(lower);
   const hasGreetingSignal = /^(oi|olá|ola|bom dia|boa tarde|boa noite)[\s!,.]*$/.test(lower.trim());
@@ -1099,12 +1104,16 @@ function normalizeExtractedItemsWithCatalog(items, catalog) {
     }
   }
 
-  for (const rawItem of (items || [])) {
-    const name = cleanText(rawItem?.name || rawItem?.nome || '');
-    if (!name) continue;
-    const key = normalizeForMatch(name);
-    if (merged.has(key)) continue;
-    merged.set(key, { name, quantity: toNumberOrOne(rawItem.quantity), integration_code: null, unit_price: null });
+  // Só adiciona itens sem correspondência no catálogo quando o catálogo estiver vazio
+  // (evita que perguntas como "Tem coca?" virem itens do pedido)
+  if (!catalog || catalog.length === 0) {
+    for (const rawItem of (items || [])) {
+      const name = cleanText(rawItem?.name || rawItem?.nome || '');
+      if (!name) continue;
+      const key = normalizeForMatch(name);
+      if (merged.has(key)) continue;
+      merged.set(key, { name, quantity: toNumberOrOne(rawItem.quantity), integration_code: null, unit_price: null });
+    }
   }
 
   return Array.from(merged.values());
@@ -1484,6 +1493,38 @@ function buildContextualAnswer(conversation, userMessage = '') {
   const menu = Array.isArray(mcp?.menu) ? mcp.menu : [];
   const payments = Array.isArray(mcp?.paymentMethods) ? mcp.paymentMethods : [];
   const deliveryAreas = Array.isArray(mcp?.deliveryAreas) ? mcp.deliveryAreas : [];
+
+  // "O que eu pedi?" / "meu pedido" → resumo parcial do pedido atual
+  if (/\b(o que (eu )?pedi|meu pedido atual|resumo do pedido|que (tenho|tem) no pedido|o que (tenho|tem) no pedido|meu pedido)\b/i.test(text)) {
+    const items = (conversation?.transaction?.items || []).filter((it) => cleanText(it.name));
+    if (items.length > 0) {
+      const lines = items.map((it) => `• ${it.quantity}x ${it.name}`).join('\n');
+      return `Seu pedido até agora:\n${lines}`;
+    }
+    return 'Ainda não registrei nenhum item no seu pedido.';
+  }
+
+  // "Tem X?" / "Existe X?" → verifica disponibilidade no cardápio
+  if (
+    /^(tem\s|existe\s|vocês?\s+tem\b|vocês?\s+têm\b)/.test(text.trim()) ||
+    (/\b(tem|existe|há|vocês?\s+têm)\b/.test(text) && /\?/.test(userMessage))
+  ) {
+    if (menu.length > 0) {
+      const query = text
+        .replace(/^(tem|existe|há|vocês?\s+tem|vocês?\s+têm)\s*/i, '')
+        .replace(/[?!.,]/g, '')
+        .trim();
+      if (query) {
+        const queryNorm = normalizeForMatch(query);
+        const found = menu.find((m) => {
+          const n = normalizeForMatch(m?.name || '');
+          return n.includes(queryNorm) || queryNorm.includes(n);
+        });
+        if (found) return `Sim, temos ${found.name}!`;
+        return `Não temos ${query} no cardápio no momento. Temos: ${menu.slice(0, 3).map((m) => m.name).join(', ')}.`;
+      }
+    }
+  }
 
   if (/\b(endereco|endereço|localiza[cç][aã]o)\b/.test(text)) {
     const address = (() => {
