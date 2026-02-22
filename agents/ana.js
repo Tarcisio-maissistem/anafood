@@ -4,7 +4,10 @@ const fs = require('fs');
 const path = require('path');
 const { OpenAI } = require('openai');
 const { loadCompanyData } = require('../lib/company-data-mcp');
-const { saveInboundMessage } = require('../lib/supabase-messages');
+const { saveInboundMessage, saveOutboundMessage } = require('../lib/supabase-messages');
+const { validateFinalOrder, recalculateTotal } = require('../lib/validators');
+const { addItemToCart, removeItem, updateQuantity, setAddress, setPayment, findCatalogItem } = require('../lib/business-logic');
+const { extractIntent: extractIntentSchema } = require('../lib/intent-extractor');
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 const BUFFER_WINDOW_MS = Number(process.env.MESSAGE_BUFFER_MS || 1000);
@@ -85,6 +88,7 @@ const STATE_FILE = process.env.ANA_STATE_FILE
 let persistTimer = null;
 const MAX_CUSTOMER_RECENT_MEMORY = 24;
 const MAX_PROMPT_MEMORY_ITEMS = 8;
+const MAX_HISTORY_TO_MODEL = 12;  // Máximo de mensagens recentes enviadas ao modelo
 
 const nowISO = () => new Date().toISOString();
 const cleanText = (t) => String(t || '').replace(/\s+/g, ' ').trim();
@@ -2478,11 +2482,8 @@ async function generatorAgent({ runtime, conversation, customer, classification,
       customerName: cleanText(customer?.name || ''),
       totalOrders: Number(customer?.totalOrders || 0),
       lastOrderSummary: cleanText(customer?.lastOrderSummary || ''),
-      recentContextSummary: cleanText(customer?.recentContextSummary || ''),
-      recentContext: recentContextForPrompt,
     },
     companyContext: runtime.companyContext || {},
-    companyMcp: conversation.companyData || {},
   };
   if (!openai) {
     return fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing, conversation);
@@ -2490,14 +2491,14 @@ async function generatorAgent({ runtime, conversation, customer, classification,
   try {
     const companyName = getCompanyDisplayName(runtime, conversation);
     const customerFirstName = cleanText(customer?.name || deterministic.customerProfile?.customerName || '').split(' ')[0] || '';
-    const c = await openai.chat.completions.create({
-      model: runtime.model,
-      temperature: runtime.temperature,
-      max_tokens: 300,
-      messages: [
-        {
-          role: 'system',
-          content: `Você é ${runtime.agentName}${companyName ? `, assistente virtual da ${companyName}` : ', assistente virtual'}. Tom: ${runtime.tone}.
+
+    // Montar mensagens: system prompt + resumo de contexto + últimas N mensagens + input atual
+    const messages = [];
+
+    // 1. System rules (fixo)
+    messages.push({
+      role: 'system',
+      content: `Você é ${runtime.agentName}${companyName ? `, assistente virtual da ${companyName}` : ', assistente virtual'}. Tom: ${runtime.tone}.
 
 IDENTIDADE: ${conversation.presented ? 'Já se apresentou nesta sessão. NÃO repita apresentação. Vá direto ao ponto.' : `Apresente-se APENAS nesta primeira mensagem como ${runtime.agentName}${companyName ? ` da ${companyName}` : ''}.`}
 
@@ -2537,34 +2538,56 @@ No ORDER_REVIEW use quebras de linha reais entre seções — não coloque tudo 
 
 DADOS DO ESTABELECIMENTO (use para responder qualquer pergunta sobre endereço, horário, pagamentos ou taxas):
 ${(() => {
-              const mcp = conversation.companyData || {};
-              const ctx = runtime.companyContext || {};
-              const addr = cleanText(mcp.company?.address || ctx.address || '');
-              const hours = cleanText(mcp.company?.openingHours || ctx.openingHours || '');
-              const payments = getAvailablePaymentMethods(runtime, conversation);
-              const delivery = Array.isArray(mcp.deliveryAreas) && mcp.deliveryAreas.length
-                ? mcp.deliveryAreas
-                : (Array.isArray(ctx.deliveryAreas) ? ctx.deliveryAreas : []);
-              const lines = [
-                addr ? `- Endereço: ${addr}` : '- Endereço: não cadastrado',
-                hours ? `- Horário: ${hours}` : '- Horário: não cadastrado',
-                payments.length ? `- Formas de pagamento: ${payments.join(', ')}` : '- Formas de pagamento: não cadastradas',
-                delivery.length ? `- Taxas de entrega: ${delivery.map(a => `${a.neighborhood || a} (${formatBRL(a.fee || 0)})`).join('; ')}` : '- Taxas de entrega: não cadastradas',
-              ];
-              return lines.join('\n');
-            })()}
+          const mcp = conversation.companyData || {};
+          const ctx = runtime.companyContext || {};
+          const addr = cleanText(mcp.company?.address || ctx.address || '');
+          const hours = cleanText(mcp.company?.openingHours || ctx.openingHours || '');
+          const payments = getAvailablePaymentMethods(runtime, conversation);
+          const delivery = Array.isArray(mcp.deliveryAreas) && mcp.deliveryAreas.length
+            ? mcp.deliveryAreas
+            : (Array.isArray(ctx.deliveryAreas) ? ctx.deliveryAreas : []);
+          const lines = [
+            addr ? `- Endereço: ${addr}` : '- Endereço: não cadastrado',
+            hours ? `- Horário: ${hours}` : '- Horário: não cadastrado',
+            payments.length ? `- Formas de pagamento: ${payments.join(', ')}` : '- Formas de pagamento: não cadastradas',
+            delivery.length ? `- Taxas de entrega: ${delivery.map(a => `${a.neighborhood || a} (${formatBRL(a.fee || 0)})`).join('; ')}` : '- Taxas de entrega: não cadastradas',
+          ];
+          return lines.join('\n');
+        })()}
 ${runtime.customPrompt ? `\nINSTRUÇÕES ESPECÍFICAS DO ESTABELECIMENTO:\n${runtime.customPrompt}` : ''}`,
-        },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            deterministic,
-            summary: conversation.contextSummary,
-            customerMemorySummary: cleanText(customer?.recentContextSummary || ''),
-            customerRecentContext: recentContextForPrompt,
-          }),
-        },
-      ],
+    });
+
+    // 2. Resumo de contexto (memória compactada de mensagens anteriores)
+    const summary = cleanText(conversation.contextSummary || '');
+    if (summary) {
+      messages.push({
+        role: 'system',
+        content: `RESUMO DA CONVERSA ATÉ AGORA:\n${summary}`,
+      });
+    }
+
+    // 3. Últimas N mensagens da conversa (janela ativa - alternando user/assistant)
+    const recentMessages = (conversation.messages || []).slice(-MAX_HISTORY_TO_MODEL);
+    for (const msg of recentMessages) {
+      if (msg.role === 'user' || msg.role === 'assistant') {
+        messages.push({
+          role: msg.role,
+          content: cleanText(msg.content || ''),
+        });
+      }
+    }
+
+    // 4. Input atual estruturado (dados determinísticos do orquestrador)
+    messages.push({
+      role: 'user',
+      content: JSON.stringify(deterministic),
+    });
+
+    const c = await openai.chat.completions.create({
+      model: runtime.model,
+      temperature: runtime.temperature,
+      max_tokens: 300,
+      messages,
     });
     const text = cleanText(c.choices?.[0]?.message?.content || '');
     if (text) return text;
@@ -2583,17 +2606,52 @@ async function maybeSummarize({ runtime, conversation, customer = null }) {
     return;
   }
   try {
+    // Preparar dados transacionais para contexto do resumo
+    const tx = conversation.transaction || {};
+    const txSnapshot = {
+      items: (tx.items || []).map(i => `${i.quantity || 1}x ${i.name}`),
+      mode: tx.mode || '',
+      address: tx.address || {},
+      payment: tx.payment || '',
+      total: tx.total_amount || 0,
+    };
     const c = await openai.chat.completions.create({
       model: runtime.model,
       temperature: 0,
-      max_tokens: 120,
+      max_tokens: 200,
       messages: [
-        { role: 'system', content: 'Resuma em ate 5 linhas o contexto transacional atual.' },
-        { role: 'user', content: JSON.stringify(conversation.messages.slice(-10)) },
+        {
+          role: 'system',
+          content: `Resuma esta conversa de pedido de restaurante de forma objetiva e factual.
+Inclua APENAS:
+- Itens já escolhidos (com quantidades)
+- Modalidade (entrega/retirada) se definida
+- Endereço fornecido (rua, número, bairro) se informado
+- Forma de pagamento se definida
+- Pendências restantes
+- Observações do cliente
+
+Seja curto e direto. Máximo 5 linhas.
+Não inclua saudações, emojis ou linguagem emocional.
+Não inclua informações que não foram mencionadas na conversa.`,
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            recentMessages: conversation.messages.slice(-12),
+            currentTransaction: txSnapshot,
+            currentState: conversation.state,
+          }),
+        },
       ],
     });
     conversation.contextSummary = cleanText(c.choices?.[0]?.message?.content || conversation.contextSummary || '');
     if (customer) customer.recentContextSummary = cleanText(conversation.contextSummary || customer.recentContextSummary || '');
+
+    // Podar mensagens antigas do estado local após resumo (manter apenas últimas MAX_HISTORY_TO_MODEL)
+    if (Array.isArray(conversation.messages) && conversation.messages.length > MAX_HISTORY_TO_MODEL) {
+      conversation.messages = conversation.messages.slice(-MAX_HISTORY_TO_MODEL);
+    }
   } catch (_) { }
 }
 
@@ -2951,7 +3009,57 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     provider: runtime.orderProvider,
   });
 
+  // Helper: persiste mensagem do assistant no Supabase (fire-and-forget)
+  const _persistOutbound = (text) => {
+    saveOutboundMessage({
+      supabaseUrl: String(runtime.supabase?.url || '').trim(),
+      serviceRoleKey: String(runtime.supabase?.serviceRoleKey || '').trim(),
+      companyId: String(conversation.companyData?.meta?.companyId || runtime.supabase?.filterValue || '').trim(),
+      tenantId: runtime.id,
+      phone: conversation.phone,
+      content: text,
+      at: new Date().toISOString(),
+    });
+  };
+
+  // ── GATE: Validação determinística antes de criar pedido ──────────────
   if (orchestratorResult.action === 'CREATE_ORDER_AND_WAIT_PAYMENT' || orchestratorResult.action === 'CREATE_ORDER_AND_CONFIRM') {
+    // Recalcular total para evitar divergências
+    const recalc = recalculateTotal(conversation.transaction.items);
+    if (Math.abs(recalc - (conversation.transaction.total_amount || 0)) > 0.01) {
+      conversation.transaction.total_amount = recalc;
+    }
+
+    const validation = validateFinalOrder(conversation.transaction, {
+      requireAddress: runtime.delivery?.requireAddress !== false,
+    });
+    if (!validation.valid) {
+      conversation.consecutiveFailures = (conversation.consecutiveFailures || 0) + 1;
+      conversation.state = STATES.ADICIONANDO_ITEM;
+      conversation.stateUpdatedAt = nowISO();
+      const errorSummary = validation.errors.join('; ');
+      const failText = `Antes de confirmar, preciso de mais algumas informações: ${errorSummary}`;
+      const sent = await sendWhatsAppMessage(conversation.phone, failText, runtime, conversation.remoteJid);
+      if (sent && typeof onSend === 'function') {
+        onSend({
+          phone: conversation.phone,
+          remoteJid: conversation.remoteJid || null,
+          text: failText,
+          instance: runtime.evolution.instance || null,
+        });
+      }
+      appendMessage(conversation, 'assistant', failText, { action: 'ORDER_VALIDATION_FAILED' });
+      appendCustomerMemory(customer, 'assistant', failText, { action: 'ORDER_VALIDATION_FAILED' }, conversation.state);
+      _persistOutbound(failText);
+      persistStateDebounced();
+      log('WARN', 'Ana: order validation failed', {
+        tenantId: runtime.id,
+        phone: conversation.phone,
+        errors: validation.errors,
+      });
+      return { success: true, reply: failText };
+    }
+
     const preValidation = resolveItemsWithCatalog(conversation.transaction.items, conversation.catalog || []);
     if (preValidation.unresolved.length) {
       conversation.consecutiveFailures = (conversation.consecutiveFailures || 0) + 1;
@@ -2969,6 +3077,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       }
       appendMessage(conversation, 'assistant', failText, { action: 'ORDER_PRE_VALIDATION_ERROR' });
       appendCustomerMemory(customer, 'assistant', failText, { action: 'ORDER_PRE_VALIDATION_ERROR' }, conversation.state);
+      _persistOutbound(failText);
       persistStateDebounced();
       return { success: true, reply: failText };
     }
@@ -3006,6 +3115,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       }
       appendMessage(conversation, 'assistant', failText, { action: 'ORDER_CREATE_ERROR' });
       appendCustomerMemory(customer, 'assistant', failText, { action: 'ORDER_CREATE_ERROR' }, conversation.state);
+      _persistOutbound(failText);
       persistStateDebounced();
       return { success: true, reply: failText };
     }
@@ -3099,6 +3209,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       if (sentGreeting) {
         appendMessage(conversation, 'assistant', greeting, { action: 'WELCOME_ONLY' });
         appendCustomerMemory(customer, 'assistant', greeting, { action: 'WELCOME_ONLY' }, conversation.state);
+        _persistOutbound(greeting);
         conversation.greeted = true;
         conversation.greetedDate = today;
         conversation.presented = true;
@@ -3127,6 +3238,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     nextState: conversation.state,
   });
   appendCustomerMemory(customer, 'assistant', reply, { action: orchestratorResult.action }, conversation.state);
+  _persistOutbound(reply);
 
   // Sincronizar nome extraído para o perfil persistente do cliente
   if (cleanText(conversation.transaction.customer_name) && !cleanText(customer.name)) {
@@ -3221,6 +3333,15 @@ function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer
       }
       appendMessage(conversation, 'assistant', failText, { action: 'PIPELINE_ERROR' });
       appendCustomerMemory(customer, 'assistant', failText, { action: 'PIPELINE_ERROR' }, conversation.state);
+      saveOutboundMessage({
+        supabaseUrl: String(runtime.supabase?.url || '').trim(),
+        serviceRoleKey: String(runtime.supabase?.serviceRoleKey || '').trim(),
+        companyId: String(conversation.companyData?.meta?.companyId || runtime.supabase?.filterValue || '').trim(),
+        tenantId: runtime.id,
+        phone: conversation.phone,
+        content: failText,
+        at: new Date().toISOString(),
+      });
       persistStateDebounced();
     } finally {
       processing.delete(key);
