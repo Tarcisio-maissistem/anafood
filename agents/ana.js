@@ -8,6 +8,7 @@ const { saveInboundMessage, saveOutboundMessage } = require('../lib/supabase-mes
 const { validateFinalOrder, recalculateTotal } = require('../lib/validators');
 const { addItemToCart, removeItem, updateQuantity, setAddress, setPayment, findCatalogItem } = require('../lib/business-logic');
 const { extractIntent: extractIntentSchema } = require('../lib/intent-extractor');
+const { transition: smTransition, missingFields: smMissingFields } = require('../lib/state-machine');
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 const BUFFER_WINDOW_MS = Number(process.env.MESSAGE_BUFFER_MS || 1000);
@@ -1386,6 +1387,229 @@ function applySnapshotToConversation(conversation, snapshot) {
   conversation.confirmed = allConfirmed;
   conversation.pendingFieldConfirmation = null;
   conversation.itemsPhaseComplete = true;
+}
+
+/**
+ * orchestrateV2 — usa state-machine.transition() como motor central.
+ * Preserva toda lógica de negócio (repeat order, upsell, confirmation, correction).
+ */
+function orchestrateV2({ runtime, conversation, customer, classification, extracted, groupedText }) {
+  // ── Merge (igual ao V1) ──
+  if (runtime.segment === 'restaurant') {
+    const extractedHasItems = Array.isArray(extracted?.items) && extracted.items.length > 0;
+    const mergeExtracted = (classification.intent === INTENTS.CONSULTA && !extractedHasItems)
+      ? { ...extracted, items: [] }
+      : (extracted || {});
+    mergeRestaurantTransaction(conversation, mergeExtracted);
+  }
+  if (runtime.segment === 'restaurant') enrichAddressWithCompanyDefaults(conversation);
+  if (runtime.segment === 'restaurant') conversation.pendingFieldConfirmation = null;
+
+  if (runtime.segment === 'restaurant' && Array.isArray(conversation.transaction?.items)) {
+    const amounts = calculateOrderAmounts(conversation.transaction, conversation);
+    conversation.transaction.total_amount = amounts.total;
+  }
+
+  // ── Handoff (igual ao V1) ──
+  const handoff = classification.handoff
+    || classification.intent === INTENTS.HUMANO
+    || Number(classification.confidence || 0) < 0.45
+    || /(raiva|horrivel|horrible|péssimo|pessimo|absurdo|ridículo|ridiculo|lamentável|lamentavel|inacreditável|inacreditavel|vergonha|uma merda|tô bravo|to bravo|tô com raiva|to com raiva|que saco|tô puto|to puto|não acredito|nao acredito|péssimo atendimento|pessimo atendimento)/i.test(groupedText)
+    || (conversation.consecutiveFailures || 0) >= 3;
+  if (handoff) return { nextState: STATES.HUMAN_HANDOFF, action: 'HUMAN_HANDOFF', missing: [] };
+
+  // ── Normalizar estado legado ──
+  let s = conversation.state;
+  if (s === 'COLLECTING_DATA') s = STATES.ADICIONANDO_ITEM;
+  if (s === 'WAITING_CONFIRMATION') s = STATES.FINALIZANDO;
+  conversation.state = s;
+
+  const i = classification.intent;
+  const yes = detectYes(groupedText);
+  const no = detectNo(groupedText);
+  const hasQuestion = /\?/.test(groupedText) || /\b(qual|quando|como|onde|que horas|card[aá]pio|pre[cç]o)\b/i.test(groupedText);
+
+  // ── Clinic (passthrough) ──
+  if (runtime.segment === 'clinic') {
+    if (s === STATES.INIT && i === INTENTS.NOVO_PEDIDO) return { nextState: STATES.ADICIONANDO_ITEM, action: 'CLINIC_COLLECT', missing: ['service', 'date', 'time'] };
+    if (s === STATES.FINALIZANDO && yes) return { nextState: STATES.CONFIRMED, action: 'CLINIC_CONFIRMED', missing: [] };
+    if (s === STATES.FINALIZANDO && no) return { nextState: STATES.ADICIONANDO_ITEM, action: 'REQUEST_ADJUSTMENTS', missing: [] };
+    return { nextState: s, action: s === STATES.INIT ? 'WELCOME' : 'ASK_MISSING_FIELDS', missing: ['service', 'date', 'time'] };
+  }
+
+  // ── INIT: repeat order flow (preservado) ──
+  if (s === STATES.INIT) {
+    const today = nowISO().slice(0, 10);
+    const hasPreviousOrder = Boolean(customer?.lastOrderSnapshot && Array.isArray(customer.lastOrderSnapshot.items) && customer.lastOrderSnapshot.items.length);
+
+    if (conversation.awaitingRepeatChoice && hasPreviousOrder) {
+      if (yes) {
+        applySnapshotToConversation(conversation, customer.lastOrderSnapshot);
+        conversation.awaitingRepeatChoice = false;
+        return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
+      }
+      if (no) { conversation.awaitingRepeatChoice = false; conversation.repeatPreview = ''; }
+      else return { nextState: STATES.INIT, action: hasQuestion ? 'ANSWER_AND_RESUME_REPEAT' : 'ASK_REPEAT_LAST_ORDER', missing: [] };
+    }
+    if (hasPreviousOrder && conversation.lastRepeatOfferDate !== today) {
+      conversation.lastRepeatOfferDate = today;
+      conversation.awaitingRepeatChoice = true;
+      conversation.repeatPreview = customer.lastOrderSummary || formatOrderPreview(customer.lastOrderSnapshot);
+      return { nextState: STATES.INIT, action: 'ASK_REPEAT_LAST_ORDER', missing: [] };
+    }
+  }
+
+  // ── Mapear intent do classificador para action do state-machine ──
+  const schemaIntent = conversation._lastSchemaIntent;
+  const smAction = schemaIntent?.action || _mapIntentToAction(i, { yes, no, groupedText, state: s });
+
+  // ── FINALIZANDO: correction flow (preservado) ──
+  if (s === STATES.FINALIZANDO) {
+    if (i === 'CORRECAO' || /\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar|ta errado|tá errado|está errado|errado|errei|n[aã]o [eé] isso)\b/i.test(groupedText)) {
+      const correction = classification.correction || detectCorrection(groupedText);
+      if (correction.type === 'QTY_UPDATE' && correction.newQty != null) {
+        const corrText = normalizeForMatch(groupedText);
+        const items = conversation.transaction.items || [];
+        let corrected = false;
+        for (const item of items) {
+          const itemNorm = normalizeForMatch(item.name);
+          if (corrText.includes(itemNorm) || itemNorm.includes(corrText.split(/\s+/).slice(-2).join(' '))) {
+            item.quantity = correction.newQty;
+            corrected = true;
+            break;
+          }
+        }
+        if (!corrected && items.length > 0) {
+          for (const item of items) {
+            if (item.quantity > correction.newQty) { item.quantity = correction.newQty; corrected = true; }
+          }
+        }
+        const amounts = calculateOrderAmounts(conversation.transaction, conversation);
+        conversation.transaction.total_amount = amounts.total;
+        return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
+      }
+      if (no) return { nextState: STATES.FINALIZANDO, action: 'CORRECTION_REBUILD', missing: [] };
+      return { nextState: STATES.FINALIZANDO, action: 'CORRECTION_REBUILD', missing: [] };
+    }
+    if (no) return { nextState: STATES.FINALIZANDO, action: 'CORRECTION_REBUILD', missing: [] };
+    if (i === INTENTS.CONSULTA || hasQuestion) return { nextState: STATES.FINALIZANDO, action: 'ANSWER_AND_CONFIRM', missing: [] };
+  }
+
+  // ── Cancelamento explícito ──
+  if ([STATES.ADICIONANDO_ITEM, STATES.MENU, STATES.CONFIRMANDO_CARRINHO, STATES.COLETANDO_ENDERECO, STATES.COLETANDO_PAGAMENTO].includes(s)) {
+    const explicitCancel = /\b(cancela|cancelar|deixa quieto|desisti|desisto|aborta|encerrar pedido)\b/i.test(groupedText);
+    if (explicitCancel || i === INTENTS.CANCELAMENTO) {
+      conversation.transaction = { mode: '', customer_name: '', items: [], notes: '', address: { street_name: '', street_number: '', neighborhood: '', city: '', state: '', postal_code: '' }, payment: '', total_amount: 0, order_id: null };
+      conversation.confirmed = {};
+      conversation.pendingFieldConfirmation = null;
+      conversation.upsellDone = false;
+      conversation.itemsPhaseComplete = false;
+      return { nextState: STATES.INIT, action: 'FLOW_CANCELLED', missing: [] };
+    }
+  }
+
+  // ── STATE MACHINE TRANSITION (core determinístico) ──
+  const smResult = smTransition(s, smAction, conversation.transaction, {
+    requireAddress: runtime.delivery?.requireAddress !== false,
+    itemsPhaseComplete: conversation.itemsPhaseComplete,
+  });
+
+  // ── Field confirmation flow (preservado) ──
+  if ([STATES.ADICIONANDO_ITEM, STATES.MENU, STATES.CONFIRMANDO_CARRINHO, STATES.COLETANDO_ENDERECO, STATES.COLETANDO_PAGAMENTO].includes(s)) {
+    if (conversation.pendingFieldConfirmation) {
+      const field = conversation.pendingFieldConfirmation;
+      if (field === 'items' && Array.isArray(extracted?.items) && extracted.items.length) {
+        conversation.pendingFieldConfirmation = null;
+      }
+    }
+    if (conversation.pendingFieldConfirmation) {
+      const field = conversation.pendingFieldConfirmation;
+      if (yes) { conversation.confirmed[field] = true; conversation.pendingFieldConfirmation = null; }
+      else if (no) {
+        clearTransactionField(conversation.transaction, field);
+        conversation.confirmed[field] = false;
+        conversation.pendingFieldConfirmation = null;
+        return { nextState: STATES.ADICIONANDO_ITEM, action: 'ASK_MISSING_FIELDS', missing: [field] };
+      } else {
+        return { nextState: STATES.ADICIONANDO_ITEM, action: hasQuestion ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION', missing: [field] };
+      }
+    }
+  }
+
+  // ── Upsell flow (preservado) ──
+  const hasItems = Array.isArray(conversation.transaction.items) && conversation.transaction.items.length > 0;
+  const hasNewItemsInMessage = Array.isArray(extracted?.items) && extracted.items.length > 0;
+  const finishedSelectingItems = detectItemsPhaseDone(groupedText);
+  if (hasNewItemsInMessage) conversation.itemsPhaseComplete = false;
+  if (hasItems && !conversation.itemsPhaseComplete && finishedSelectingItems && !hasNewItemsInMessage) {
+    conversation.itemsPhaseComplete = true;
+    conversation.upsellDone = true;
+  }
+  if (hasItems && !conversation.itemsPhaseComplete && !conversation.upsellDone && i !== INTENTS.CANCELAMENTO && !yes && !no && !hasQuestion && !finishedSelectingItems) {
+    conversation.upsellDone = true;
+    const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, { itemsPhaseComplete: conversation.itemsPhaseComplete });
+    return { nextState: STATES.ADICIONANDO_ITEM, action: 'UPSELL_SUGGEST', missing };
+  }
+  if (hasItems && !conversation.itemsPhaseComplete && conversation.upsellDone && (no || finishedSelectingItems) && !hasNewItemsInMessage) {
+    conversation.itemsPhaseComplete = true;
+    const updatedMissing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, { itemsPhaseComplete: true });
+    return { nextState: STATES.ADICIONANDO_ITEM, action: 'ASK_MISSING_FIELDS', missing: updatedMissing };
+  }
+
+  // ── Calcular missing fields (determinístico) ──
+  const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+    itemsPhaseComplete: conversation.itemsPhaseComplete,
+  });
+
+  // ── Field pending confirmation ──
+  if (missing.length && !conversation.pendingFieldConfirmation) {
+    const firstMissing = missing[0];
+    const hasValueForField = firstMissing === 'items'
+      ? Array.isArray(conversation.transaction.items) && conversation.transaction.items.length > 0
+      : firstMissing.startsWith('address.')
+        ? Boolean(cleanText(conversation.transaction.address?.[firstMissing.slice('address.'.length)]))
+        : Boolean(cleanText(conversation.transaction[firstMissing]));
+    if (firstMissing !== 'items' && hasValueForField) conversation.pendingFieldConfirmation = firstMissing;
+  }
+  if (conversation.pendingFieldConfirmation === 'items') conversation.pendingFieldConfirmation = null;
+  if (conversation.pendingFieldConfirmation) {
+    let subState = STATES.ADICIONANDO_ITEM;
+    if (conversation.pendingFieldConfirmation.startsWith('address.')) subState = STATES.COLETANDO_ENDERECO;
+    else if (conversation.pendingFieldConfirmation === 'payment') subState = STATES.COLETANDO_PAGAMENTO;
+    else if (conversation.pendingFieldConfirmation === 'mode') subState = STATES.CONFIRMANDO_CARRINHO;
+    return { nextState: subState, action: (i === INTENTS.CONSULTA || hasQuestion) ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION', missing: [conversation.pendingFieldConfirmation] };
+  }
+
+  // ── Usar resultado do state-machine (com override para missing/sub-estado) ──
+  if (missing.length) {
+    let subState = STATES.ADICIONANDO_ITEM;
+    const firstMissing = missing[0];
+    if (firstMissing === 'items') subState = STATES.ADICIONANDO_ITEM;
+    else if (firstMissing === 'mode') subState = STATES.CONFIRMANDO_CARRINHO;
+    else if (firstMissing.startsWith('address.')) subState = STATES.COLETANDO_ENDERECO;
+    else if (firstMissing === 'payment') subState = STATES.COLETANDO_PAGAMENTO;
+    return { nextState: subState, action: (i === INTENTS.CONSULTA || hasQuestion) ? 'ANSWER_AND_RESUME' : smResult.action, missing };
+  }
+
+  return { nextState: smResult.nextState, action: smResult.action, missing: [] };
+}
+
+/**
+ * Mapeia intent do classificador para action do state-machine.
+ */
+function _mapIntentToAction(intent, ctx) {
+  const map = {
+    [INTENTS.NOVO_PEDIDO]: 'add_item',
+    [INTENTS.SAUDACAO]: 'greeting',
+    [INTENTS.CONSULTA]: 'ask_question',
+    [INTENTS.CANCELAMENTO]: 'cancel_order',
+    [INTENTS.PAGAMENTO]: 'set_payment',
+    [INTENTS.HUMANO]: 'unknown',
+    [INTENTS.SPAM]: 'unknown',
+  };
+  if (ctx.yes && ctx.state === STATES.FINALIZANDO) return 'confirm_order';
+  if (ctx.no && ctx.state === STATES.FINALIZANDO) return 'cancel_order';
+  return map[intent] || 'unknown';
 }
 
 function orchestrate({ runtime, conversation, customer, classification, extracted, groupedText }) {
@@ -3179,7 +3403,9 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   });
 
   const previousState = conversation.state;
-  const orchestratorResult = orchestrate({ runtime, conversation, customer, classification, extracted, groupedText: normalizedText });
+  const orchestratorResult = (process.env.USE_STATE_MACHINE === 'true')
+    ? orchestrateV2({ runtime, conversation, customer, classification, extracted, groupedText: normalizedText })
+    : orchestrate({ runtime, conversation, customer, classification, extracted, groupedText: normalizedText });
   conversation.state = orchestratorResult.nextState;
   if (conversation.state !== previousState) conversation.stateUpdatedAt = nowISO();
 
