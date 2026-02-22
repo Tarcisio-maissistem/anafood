@@ -2177,19 +2177,19 @@ function calculateOrderAmounts(tx, conversation = null) {
 
 function generateOrderSummary(tx, conversation = null, { withConfirmation = true } = {}) {
   const safeTx = tx || {};
-  // Emoji funcional por categoria de item
-  const categoryEmoji = { BEBIDA: '🥤', SOBREMESA: '🍮', ACOMPANHAMENTO: '🍟', PRATO: '🍽️' };
+
   const items = (safeTx.items || []).map((it) => {
     const unitPrice = Number(it.unit_price || 0);
     const qty = Number(it.quantity || 1);
     const lineTotal = unitPrice * qty;
-    const emoji = categoryEmoji[categorizeItem(it.name)] || '🍽️';
+    const emoji = categorizeItem(it.name);
     return `${emoji} ${it.name} (${qty})${lineTotal > 0 ? ` — ${formatBRL(lineTotal / 100)}` : ''}`;
   }).join('\n') || '• Sem itens';
 
   const paymentMap = { PIX: 'PIX', CARD: 'Cartão', CASH: 'Dinheiro' };
   const payment = paymentMap[safeTx.payment] || safeTx.payment || 'Não informado';
-  const mode = safeTx.mode === 'TAKEOUT' ? 'Retirada' : 'Entrega';
+  const modeLabel = safeTx.mode === 'TAKEOUT' ? 'Retirada' : 'Entrega';
+
   const addrParts = [
     safeTx.address?.street_name,
     safeTx.address?.street_number ? `nº ${safeTx.address.street_number}` : '',
@@ -2201,6 +2201,7 @@ function generateOrderSummary(tx, conversation = null, { withConfirmation = true
 
   const amounts = calculateOrderAmounts(safeTx, conversation);
   const feeNeighborhood = amounts.feeInfo?.neighborhood || cleanText(safeTx.address?.neighborhood || '');
+
   const lines = [
     '🧾 *Resumo do seu pedido*',
     '',
@@ -2208,23 +2209,35 @@ function generateOrderSummary(tx, conversation = null, { withConfirmation = true
     '',
     `Subtotal: ${formatBRL(amounts.itemTotal / 100)}`,
   ];
+
   if (safeTx.mode === 'DELIVERY') {
     const feeLabel = feeNeighborhood ? `🚚 Taxa de entrega (${feeNeighborhood})` : '🚚 Taxa de entrega';
     lines.push(`${feeLabel}: ${amounts.feeCents > 0 ? formatBRL(amounts.feeCents / 100) : 'a confirmar'}`);
   }
-  lines.push('');
+
   lines.push(`💰 *Total: ${formatBRL(amounts.total / 100)}*`);
   lines.push('');
+
   if (safeTx.mode === 'DELIVERY' && addrParts.length) {
-    lines.push(`📍 ${addrParts.join(', ')}`);
+    lines.push(`📍 *Entrega:* ${addrParts.join(', ')}`);
   } else if (safeTx.mode === 'TAKEOUT') {
-    lines.push(`🏪 Retirada no local`);
+    lines.push(`🏪 *Retirada no local*`);
+  } else {
+    lines.push(`🚚 *Modo:* ${modeLabel}`);
   }
-  lines.push(`💳 Pagamento: ${payment}`);
+
+  lines.push(`💳 *Pagamento:* ${payment}`);
+
   if (safeTx.payment === 'CASH' && safeTx.change_for) {
-    lines.push(`💵 Troco para: ${formatBRL(safeTx.change_for)}`);
+    const changeVal = Number(safeTx.change_for);
+    const changeText = isNaN(changeVal) ? safeTx.change_for : formatBRL(changeVal);
+    lines.push(`💵 *Troco para:* ${changeText}`);
   }
-  if (withConfirmation) lines.push('', 'Está tudo certo para confirmar? 😊');
+
+  if (withConfirmation) {
+    lines.push('', 'Está tudo certo para confirmar? 😊');
+  }
+
   return lines.join('\n');
 }
 
@@ -2460,10 +2473,11 @@ function isSideItemName(name = '') {
 }
 
 function categorizeItem(name = '') {
-  if (isBeverageItemName(name)) return 'BEBIDA';
-  if (isDessertItemName(name)) return 'SOBREMESA';
-  if (isSideItemName(name)) return 'ACOMPANHAMENTO';
-  return 'PRATO';
+  const n = normalizeForMatch(name);
+  if (isBeverageItemName(n)) return '🥤';
+  if (isDessertItemName(n)) return '🍮';
+  if (isSideItemName(n)) return '🍟';
+  return '🍽️';
 }
 
 function resolveDeliveryFee(conversation, tx) {
@@ -2511,7 +2525,6 @@ function resolveDeliveryFee(conversation, tx) {
 
 function fallbackText(runtime, action, tx, missing, conversation = null) {
   const firstName = cleanText(tx?.customer_name || '').split(' ')[0] || '';
-  const hi = firstName ? `${firstName}, ` : '';
   const agentName = runtime?.agentName || 'Ana';
   const companyName = getCompanyDisplayName(runtime, conversation);
 
@@ -3002,7 +3015,7 @@ SEGURANÇA:
 
 ESTILO: Linguagem natural brasileira. Prefira "já anotei", "pode deixar", "tudo certo". Evite palavras robóticas.
 
-DADOS DO ESTABELECIMENTO (use para responder qualquer pergunta sobre endereço, horário, pagamentos ou taxas):
+DADOS DO ESTABELECIMENTO:
 ${(() => {
           const mcp = conversation.companyData || {};
           const ctx = runtime.companyContext || {};
