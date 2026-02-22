@@ -85,14 +85,17 @@ const followUpTimers = new Map();
 const STATE_FILE = process.env.ANA_STATE_FILE
   ? path.resolve(process.env.ANA_STATE_FILE)
   : path.join(__dirname, '..', 'data', 'ana_state.json');
+const SYSTEM_PROMPT_FILE = path.join(__dirname, 'ana', 'system_prompt.txt');
 
 let persistTimer = null;
+let systemPromptCache = { mtimeMs: 0, content: '' };
 const MAX_CUSTOMER_RECENT_MEMORY = 24;
 const MAX_PROMPT_MEMORY_ITEMS = 8;
 const MAX_HISTORY_TO_MODEL = 12;  // Máximo de mensagens recentes enviadas ao modelo
 
 const nowISO = () => new Date().toISOString();
 const cleanText = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+const normalizePromptText = (t) => String(t || '').replace(/\r\n/g, '\n').trim();
 const toNumberOrOne = (v) => { const n = parseInt(String(v || '').trim(), 10); return Number.isFinite(n) && n > 0 ? n : 1; };
 const detectYes = (t) => {
   const x = cleanText(t).toLowerCase();
@@ -145,6 +148,22 @@ const singularizeToken = (token) => {
   return t;
 };
 const canonicalTokens = (v) => tokenizeNormalized(v).map(singularizeToken).filter(Boolean);
+
+function loadAnaSystemPrompt() {
+  try {
+    const st = fs.statSync(SYSTEM_PROMPT_FILE);
+    if (!systemPromptCache.content || st.mtimeMs !== systemPromptCache.mtimeMs) {
+      const content = fs.readFileSync(SYSTEM_PROMPT_FILE, 'utf8');
+      systemPromptCache = {
+        mtimeMs: st.mtimeMs,
+        content: normalizePromptText(content),
+      };
+    }
+    return systemPromptCache.content || '';
+  } catch (_) {
+    return '';
+  }
+}
 
 function levenshtein(a, b) {
   const s = String(a || '');
@@ -2957,13 +2976,14 @@ async function generatorAgent({ runtime, conversation, customer, classification,
   try {
     const companyName = getCompanyDisplayName(runtime, conversation);
     const customerFirstName = cleanText(customer?.name || deterministic.customerProfile?.customerName || '').split(' ')[0] || '';
+    const externalSystemPrompt = loadAnaSystemPrompt();
 
     // Montar mensagens: system prompt + resumo de contexto + últimas N mensagens + input atual
     const messages = [];
 
     messages.push({
       role: 'system',
-      content: `Você é ${runtime.agentName}${companyName ? `, assistente virtual da ${companyName}` : ', assistente virtual'}. Tom: ${runtime.tone}.
+      content: `${externalSystemPrompt ? `${externalSystemPrompt}\n\n` : ''}Você é ${runtime.agentName}${companyName ? `, assistente virtual da ${companyName}` : ', assistente virtual'}. Tom: ${runtime.tone}.
 
 IDENTIDADE DA MARCA:
 ${conversation.presented
@@ -3952,4 +3972,3 @@ module.exports = {
   STATES,
   INTENTS,
 };
-
