@@ -1064,7 +1064,7 @@ function markFieldChanged(conv, field) {
   conv.confirmed[field] = false;
 }
 
-function mergeRestaurantTransaction(conv, extracted) {
+function _mergeRestaurantTransactionLegacy(conv, extracted) {
   if (extracted.customer_name) {
     const next = cleanText(extracted.customer_name);
     if (next && next !== cleanText(conv.transaction.customer_name)) {
@@ -1101,12 +1101,9 @@ function mergeRestaurantTransaction(conv, extracted) {
       });
       if (existing) {
         const before = Number(existing.quantity || 0);
-        // Por padrão: SET (fonte de verdade é a mensagem atual)
-        // Somente SOMA se o item tiver flag incremental ("mais 1", "adiciona", "faltou")
         if (item.incremental) existing.quantity += toNumberOrOne(item.quantity);
         else existing.quantity = toNumberOrOne(item.quantity);
         if (Number(existing.quantity || 0) !== before) changed = true;
-        // Preenche código e preço se ainda estavam vazios (item normalizado com catálogo)
         if (!existing.integration_code && item.integration_code) existing.integration_code = String(item.integration_code);
         if (!existing.unit_price && Number(item.unit_price || 0)) existing.unit_price = Number(item.unit_price);
       } else {
@@ -1137,6 +1134,121 @@ function mergeRestaurantTransaction(conv, extracted) {
       }
     }
   }
+  if (
+    !cleanText(conv.transaction.mode)
+    && (cleanText(conv.transaction.address?.street_name) || cleanText(conv.transaction.address?.neighborhood))
+  ) {
+    conv.transaction.mode = 'DELIVERY';
+    markFieldChanged(conv, 'mode');
+  }
+}
+
+/**
+ * V2: Usa tools de business-logic.js para merge determinístico.
+ * Items são validados contra catálogo antes de adicionar.
+ */
+function mergeRestaurantTransaction(conv, extracted) {
+  const catalog = conv.catalog || [];
+
+  // ── Customer name ──
+  if (extracted.customer_name) {
+    const next = cleanText(extracted.customer_name);
+    if (next && next !== cleanText(conv.transaction.customer_name)) {
+      conv.transaction.customer_name = next;
+      markFieldChanged(conv, 'customer_name');
+    }
+  }
+
+  // ── Notes ──
+  if (typeof extracted.notes === 'string' && extracted.notes) {
+    const next = cleanText(extracted.notes);
+    if (next && next !== cleanText(conv.transaction.notes)) {
+      conv.transaction.notes = next;
+      markFieldChanged(conv, 'notes');
+    }
+  }
+
+  // ── Mode (via business-logic pattern) ──
+  if (extracted.mode && extracted.mode !== conv.transaction.mode) {
+    conv.transaction.mode = extracted.mode;
+    markFieldChanged(conv, 'mode');
+  }
+
+  // ── Payment (via setPayment tool) ──
+  if (extracted.payment) {
+    const payResult = setPayment(extracted.payment, conv.transaction);
+    if (payResult.success && extracted.payment !== conv.transaction.payment) {
+      // setPayment already set conv.transaction.payment
+    }
+    if (payResult.success) markFieldChanged(conv, 'payment');
+  }
+
+  // ── Items (via addItemToCart tool — valida contra catálogo) ──
+  if (Array.isArray(extracted.items)) {
+    let changed = false;
+    for (const item of extracted.items) {
+      const name = cleanText(item.name || item.nome || '');
+      if (!name) continue;
+
+      // Tentar via business-logic (validação de catálogo)
+      const result = addItemToCart(
+        { item_name: name, quantity: toNumberOrOne(item.quantity), incremental: Boolean(item.incremental) },
+        catalog,
+        conv.transaction
+      );
+
+      if (result.success) {
+        changed = true;
+      } else {
+        // Fallback: item não encontrado no catálogo — adicionar direto (compatibilidade)
+        const existing = conv.transaction.items.find((i) => {
+          if (cleanText(item.integration_code) && cleanText(i.integration_code)) {
+            return cleanText(i.integration_code) === cleanText(item.integration_code);
+          }
+          return normalizeForMatch(i.name) === normalizeForMatch(name);
+        });
+        if (existing) {
+          if (item.incremental) existing.quantity += toNumberOrOne(item.quantity);
+          else existing.quantity = toNumberOrOne(item.quantity);
+          if (!existing.integration_code && item.integration_code) existing.integration_code = String(item.integration_code);
+          if (!existing.unit_price && Number(item.unit_price || 0)) existing.unit_price = Number(item.unit_price);
+        } else {
+          conv.transaction.items.push({
+            name,
+            quantity: toNumberOrOne(item.quantity),
+            integration_code: item.integration_code || null,
+            unit_price: Number(item.unit_price || 0) || null,
+          });
+        }
+        changed = true;
+      }
+    }
+    if (changed) {
+      markFieldChanged(conv, 'items');
+      conv.upsellDone = false;
+      conv.itemsPhaseComplete = false;
+    }
+  }
+
+  // ── Address (via setAddress tool — merge progressivo) ──
+  if (extracted.address && typeof extracted.address === 'object') {
+    // Filtrar valores não-informativos antes de passar para setAddress
+    const cleanAddr = {};
+    for (const [k, v] of Object.entries(extracted.address)) {
+      const next = cleanText(v);
+      if (next && !isNonInformativeFieldValue(next)) cleanAddr[k] = next;
+    }
+    if (Object.keys(cleanAddr).length) {
+      const addrResult = setAddress(cleanAddr, conv.transaction);
+      if (addrResult.success) {
+        for (const k of Object.keys(cleanAddr)) {
+          markFieldChanged(conv, `address.${k}`);
+        }
+      }
+    }
+  }
+
+  // ── Auto-detect delivery mode ──
   if (
     !cleanText(conv.transaction.mode)
     && (cleanText(conv.transaction.address?.street_name) || cleanText(conv.transaction.address?.neighborhood))
