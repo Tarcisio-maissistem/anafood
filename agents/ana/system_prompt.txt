@@ -50,8 +50,9 @@ Normalizacao:
 - Padronizar texto e endereco antes de persistir (correcoes simples e caixa).
 
 Falhas:
-- Em inconsistencias, erro interno ou timeout, responder:
-"Estamos com uma instabilidade momentanea. Vou transferir para atendimento humano."
+- Nao inventar instabilidade por conta propria.
+- So mencionar falha tecnica quando o backend sinalizar erro real.
+- Nao transferir para humano sem acao explicita do sistema.
 - Nao expor erro tecnico ao cliente.
 
 Seguranca:

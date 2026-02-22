@@ -101,6 +101,8 @@ const detectYes = (t) => {
   const x = cleanText(t).toLowerCase();
   if (/^sim\b/.test(x) || /\btudo\s*certo\b/.test(x) || /\best[aá]\s*certo\b/.test(x)) return true;
   if (/^(sim|ok|isso|certo|confirmo|confirmar|fechado|claro|pode|bora|vai|positivo|afirmativo|quero|desejo|pode ser|com certeza|perfeito|exato|exatamente|correto|isso mesmo|tá bom|ta bom|tudo certo|manda|manda sim|quero sim|pode mandar|fechou|topo|combinado|beleza)$/.test(x)) return true;
+  if (/\b(ma?is|mas)\s+sim\b/.test(x)) return true;
+  if (/\bsim\b/.test(x) && !/\bnao\b/.test(x) && !/\bnão\b/.test(x)) return true;
   if (x.includes('confirm') || x.includes('quero sim') || x.includes('pode sim') || x.includes('claro que sim')) return true;
   return false;
 };
@@ -603,6 +605,21 @@ function isNonInformativeFieldValue(value) {
   return /\b(ja falei|jah falei|ja informei|ja passei|como ja falei|eu ja falei|mesmo de antes|o mesmo|isso ai|isso ae|isso mesmo)\b/.test(x);
 }
 
+function replyContainsGreeting(text) {
+  const raw = cleanText(text);
+  if (!raw) return false;
+  if (/^ol[aá]/i.test(raw)) return true;
+  if (/\baqui\s+[ée]\s+a\b/i.test(raw)) return true;
+  if (/\bsou\s+a\b/i.test(raw)) return true;
+  return false;
+}
+
+function replyContainsFailSafePhrase(text) {
+  const x = normalizeForMatch(text);
+  if (!x) return false;
+  return x.includes('instabilidade') || x.includes('atendimento humano') || x.includes('transferir para atendimento');
+}
+
 function sanitizeAssistantReply({ reply, conversation, action }) {
   let text = String(reply || '').trim();
   if (!text) return '';
@@ -905,6 +922,33 @@ function detectCorrection(text) {
   return { isCorrection: false, type: null, newQty: null };
 }
 
+function detectCorrectionStable(text) {
+  const lower = cleanText(text).toLowerCase();
+  const qtyWords = { um: 1, uma: 1, dois: 2, duas: 2, tres: 3, três: 3, quatro: 4, cinco: 5 };
+
+  const qtyRegexes = [
+    /(?:somente|apenas|só|so)\s+(\d+|um|uma|dois|duas|tres|três|quatro|cinco)\b/i,
+    /(?:não|nao)\s+(?:é|e)\s+\d+.+(?:é|e)\s+(?:somente|apenas|só|so)?\s*(\d+|um|uma|dois|duas|tres|três|quatro|cinco)\b/i,
+    /(?:corrige|corrigir|mudar?|alterar?)\s+(?:para|pra)\s+(\d+|um|uma|dois|duas|tres|três|quatro|cinco)\b/i,
+    /(?:vai\s+ser|vai\s+ficar|ficar|fica|será|sera)\s+(?:somente|apenas|só|so)?\s*(\d+|um|uma|dois|duas|tres|três|quatro|cinco)\b/i,
+  ];
+
+  let numMatch = null;
+  for (const rx of qtyRegexes) {
+    const m = lower.match(rx);
+    if (m) { numMatch = m; break; }
+  }
+
+  const isError = /\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar|ta errado|tá errado|está errado|errado|errei|incorreto|troquei|trocar|troca|não é isso|nao e isso)\b/i.test(lower);
+  if (numMatch) {
+    const token = String(numMatch[1] || '').toLowerCase();
+    const newQty = Number(token) || qtyWords[token] || 1;
+    return { isCorrection: true, type: 'QTY_UPDATE', newQty };
+  }
+  if (isError) return { isCorrection: true, type: 'GENERIC_ERROR', newQty: null };
+  return { isCorrection: false, type: null, newQty: null };
+}
+
 // ── Normalização determinística de quantidade (barreira pós-extração) ────────
 function normalizeQuantityFromText(items, originalText) {
   if (!Array.isArray(items) || !items.length) return items;
@@ -993,7 +1037,7 @@ async function classifierAgent({ runtime, conversation, groupedText }) {
   if (/atendente|humano|pessoa/.test(lower)) return { intent: INTENTS.HUMANO, requires_extraction: false, handoff: true, confidence: 1 };
 
   // CORREÇÃO: regex ANTES do classificador LLM — nunca deixar modelo decidir isso
-  const correction = detectCorrection(groupedText);
+  const correction = detectCorrectionStable(groupedText);
   if (correction.isCorrection) {
     return { intent: 'CORRECAO', requires_extraction: false, handoff: false, confidence: 0.95, correction };
   }
@@ -1215,10 +1259,19 @@ function mergeRestaurantTransaction(conv, extracted) {
       if (trocoMatch) {
         conv.transaction.change_for = trocoMatch[1].replace(',', '.');
         markFieldChanged(conv, 'change_for');
+      } else {
+        const pureAmountMatch = text.match(/^\s*(\d{1,4}(?:[.,]\d{1,2})?)\s*$/);
+        const awaitingChange = conv.pendingFieldConfirmation === 'change_for'
+          || conv.state === STATES.COLETANDO_PAGAMENTO
+          || conv.state === STATES.FINALIZANDO;
+        if (pureAmountMatch && awaitingChange) {
+          conv.transaction.change_for = pureAmountMatch[1].replace(',', '.');
+          markFieldChanged(conv, 'change_for');
+        }
       }
     }
     if (extracted.change_for) {
-      conv.transaction.change_for = extracted.change_for;
+      conv.transaction.change_for = String(extracted.change_for).replace(',', '.');
       markFieldChanged(conv, 'change_for');
     }
   }
@@ -1512,7 +1565,7 @@ function orchestrateV2({ runtime, conversation, customer, classification, extrac
   // ── FINALIZANDO: correction flow (preservado) ──
   if (s === STATES.FINALIZANDO) {
     if (i === 'CORRECAO' || /\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar|ta errado|tá errado|está errado|errado|errei|n[aã]o [eé] isso)\b/i.test(groupedText)) {
-      const correction = classification.correction || detectCorrection(groupedText);
+      const correction = classification.correction || detectCorrectionStable(groupedText);
       if (correction.type === 'QTY_UPDATE' && correction.newQty != null) {
         const corrText = normalizeForMatch(groupedText);
         const items = conversation.transaction.items || [];
@@ -1891,7 +1944,7 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
 
     // ── CORREÇÃO DETERMINÍSTICA: permanece em FINALIZANDO, aplica UPDATE_ITEM ──
     if (i === 'CORRECAO' || /\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar|ta errado|tá errado|está errado|errado|errei|n[aã]o [eé] isso)\b/i.test(groupedText)) {
-      const correction = classification.correction || detectCorrection(groupedText);
+      const correction = classification.correction || detectCorrectionStable(groupedText);
       if (correction.type === 'QTY_UPDATE' && correction.newQty != null) {
         // UPDATE_ITEM: aplicar correção de quantidade diretamente no carrinho
         const corrText = normalizeForMatch(groupedText);
@@ -3674,6 +3727,16 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
 
   const alwaysDeterministicActions = new Set([
     'ORDER_REVIEW',
+    'ASK_MISSING_FIELDS',
+    'ASK_FIELD_CONFIRMATION',
+    'ASK_CONFIRMATION',
+    'ANSWER_AND_RESUME',
+    'ANSWER_AND_RESUME_CONFIRM',
+    'ANSWER_AND_RESUME_REPEAT',
+    'ANSWER_AND_CONFIRM',
+    'UPSELL_SUGGEST',
+    'REQUEST_ADJUSTMENTS',
+    'CORRECTION_REBUILD',
     'PAYMENT_REMINDER',
     'FLOW_CANCELLED',
     'CREATE_ORDER_AND_WAIT_PAYMENT',
@@ -3708,8 +3771,11 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       groupedText: text,
       contextualHint,
     })) || fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing || [], conversation);
+  const effectiveRawReply = (replyContainsFailSafePhrase(rawReply) && orchestratorResult.action !== 'HUMAN_HANDOFF')
+    ? fallbackText(runtime, orchestratorResult.action, conversation.transaction, orchestratorResult.missing || [], conversation)
+    : rawReply;
   const reply = sanitizeAssistantReply({
-    reply: rawReply,
+    reply: effectiveRawReply,
     conversation,
     action: orchestratorResult.action,
   });
@@ -3717,39 +3783,32 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   anaDebug('RESPONSE', {
     action: orchestratorResult.action,
     deterministic: alwaysDeterministicActions.has(orchestratorResult.action),
-    rawReplyPreview: String(rawReply || '').slice(0, 200),
+    rawReplyPreview: String(effectiveRawReply || '').slice(0, 200),
     finalReplyPreview: String(reply || '').slice(0, 200),
-    sanitized: rawReply !== reply,
+    sanitized: effectiveRawReply !== reply,
   });
+  let finalReply = reply;
   if (conversation.state !== STATES.HUMAN_HANDOFF || !conversation.handoffNotified) {
     const today = nowISO().slice(0, 10);
-    const shouldSendGreetingFirst = previousState === STATES.INIT && cleanText(conversation.greetedDate || '') !== today;
-    if (shouldSendGreetingFirst) {
-      const greeting = buildInitialGreeting(runtime, conversation, customer);
-      const sentGreeting = await sendWhatsAppMessage(conversation.phone, greeting, runtime, conversation.remoteJid);
-      if (sentGreeting && typeof onSend === 'function') {
-        onSend({
-          phone: conversation.phone,
-          remoteJid: conversation.remoteJid || null,
-          text: greeting,
-          instance: runtime.evolution.instance || null,
-        });
-      }
-      if (sentGreeting) {
-        appendMessage(conversation, 'assistant', greeting, { action: 'WELCOME_ONLY' });
-        appendCustomerMemory(customer, 'assistant', greeting, { action: 'WELCOME_ONLY' }, conversation.state);
-        _persistOutbound(greeting);
-        conversation.greeted = true;
-        conversation.greetedDate = today;
-        conversation.presented = true;
-      }
+    const shouldPrefixGreeting = previousState === STATES.INIT
+      && cleanText(conversation.greetedDate || '') !== today
+      && !replyContainsGreeting(reply);
+    finalReply = shouldPrefixGreeting
+      ? `${buildInitialGreeting(runtime, conversation, customer)}\n\n${reply}`
+      : reply;
+
+    if (shouldPrefixGreeting) {
+      conversation.greeted = true;
+      conversation.greetedDate = today;
+      conversation.presented = true;
     }
-    const sent = await sendWhatsAppMessage(conversation.phone, reply, runtime, conversation.remoteJid);
+
+    const sent = await sendWhatsAppMessage(conversation.phone, finalReply, runtime, conversation.remoteJid);
     if (sent && typeof onSend === 'function') {
       onSend({
         phone: conversation.phone,
         remoteJid: conversation.remoteJid || null,
-        text: reply,
+        text: finalReply,
         instance: runtime.evolution.instance || null,
       });
     }
@@ -3760,14 +3819,14 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     }
   }
 
-  appendMessage(conversation, 'assistant', reply, {
+  appendMessage(conversation, 'assistant', finalReply, {
     action: orchestratorResult.action,
     intent: classification.intent,
     prevState: previousState,
     nextState: conversation.state,
   });
-  appendCustomerMemory(customer, 'assistant', reply, { action: orchestratorResult.action }, conversation.state);
-  _persistOutbound(reply);
+  appendCustomerMemory(customer, 'assistant', finalReply, { action: orchestratorResult.action }, conversation.state);
+  _persistOutbound(finalReply);
 
   // Sincronizar nome extraído para o perfil persistente do cliente
   if (cleanText(conversation.transaction.customer_name) && !cleanText(customer.name)) {
@@ -3783,7 +3842,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   scheduleFollowUp(conversation, runtime.evolution);
 
   persistStateDebounced();
-  return { success: true, reply };
+  return { success: true, reply: finalReply };
 }
 
 function enqueueMessageBlock({ conversation, text, rawMessage, runtime, customer, apiRequest, getEnvConfig, log, onSend = null }) {
