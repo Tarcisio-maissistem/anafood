@@ -318,12 +318,12 @@ function extractAddressFromText(text) {
     else out.neighborhood = cleanText(`${prefix} ${base}`);
   }
 
-  const cityUfSlash = sanitized.match(/\b([A-Za-zÀ-ÿ\s]+)\s*\/\s*([A-Za-z]{2})\b/);
+  const cityUfSlash = sanitized.match(/\b([A-Za-z\u00C0-\u00FF\s]+)\s*\/\s*([A-Za-z]{2})\b/);
   if (cityUfSlash) {
     out.city = cleanText(cityUfSlash[1]);
     out.state = normalizeStateUF(cityUfSlash[2]);
   } else {
-    const cityUfInline = sanitized.match(/\b([A-Za-zÀ-ÿ\s]+)\s+([A-Za-z]{2})\b$/);
+    const cityUfInline = sanitized.match(/\b([A-Za-z\u00C0-\u00FF\s]+)\s+([A-Za-z]{2})\b$/);
     if (cityUfInline) {
       out.city = cleanText(cityUfInline[1]);
       out.state = normalizeStateUF(cityUfInline[2]);
@@ -342,7 +342,7 @@ function enrichAddressWithCompanyDefaults(conversation) {
   if (!companyAddress) return;
 
   if (!cleanText(addr.city) || !cleanText(addr.state)) {
-    const m = companyAddress.match(/\b([A-Za-zÀ-ÿ\s]+)\s*\/\s*([A-Za-z]{2})\b/);
+    const m = companyAddress.match(/\b([A-Za-z\u00C0-\u00FF\s]+)\s*\/\s*([A-Za-z]{2})\b/);
     if (m) {
       if (!cleanText(addr.city)) addr.city = cleanText(m[1]);
       if (!cleanText(addr.state)) addr.state = normalizeStateUF(m[2]);
@@ -617,7 +617,16 @@ function replyContainsGreeting(text) {
 function replyContainsFailSafePhrase(text) {
   const x = normalizeForMatch(text);
   if (!x) return false;
-  return x.includes('instabilidade') || x.includes('atendimento humano') || x.includes('transferir para atendimento');
+  return (
+    x.includes('instabilidade')
+    || x.includes('atendimento humano')
+    || x.includes('transferir para atendimento')
+    || x.includes('erro tecnico')
+    || x.includes('falha tecnica')
+    || x.includes('sistema esta com')
+    || x.includes('houve um erro')
+    || x.includes('parece que houve')
+  );
 }
 
 function isMenuQueryText(text) {
@@ -1051,6 +1060,11 @@ async function classifierAgent({ runtime, conversation, groupedText }) {
     return { intent: 'CORRECAO', requires_extraction: false, handoff: false, confidence: 0.95, correction };
   }
 
+  const isTaxaQuery = /\b(taxa\s*(de)?\s*entrega|valor\s*(da)?\s*(taxa|entrega)|quanto\s*(custa|e|eh|fica)\s*(a\s*)?(taxa|entrega|delivery))\b/i.test(lower);
+  if (isTaxaQuery) {
+    return { intent: INTENTS.CONSULTA, requires_extraction: false, handoff: false, confidence: 0.99, _subIntent: 'DELIVERY_FEE' };
+  }
+
   if (/\b(horario|funcionamento|endereco|endereço|pagamento|formas de pagamento|valor|pre[cç]o|card[aá]pio|cardapio|menu)\b/.test(lower)) {
     return { intent: INTENTS.CONSULTA, requires_extraction: false, handoff: false, confidence: 0.95 };
   }
@@ -1120,7 +1134,7 @@ async function extractorAgent({ runtime, groupedText }) {
   };
   if (/\b(nao|não)\s+tem\s+num(?:ero)?\b/i.test(groupedText)) out.address.street_number = 'S/N';
 
-  const nameMatch = groupedText.match(/(?:meu nome (?:é|e)|sou|chamo-me|me chamo)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]{2,60})/i);
+  const nameMatch = groupedText.match(/(?:meu nome (?:e|eh)|sou|chamo-me|me chamo)\s+([A-Za-z\u00C0-\u00FF][A-Za-z\u00C0-\u00FF\s]{2,60})/i);
   if (nameMatch) out.customer_name = cleanText(nameMatch[1]);
   if (/sem observa|sem complemento|sem adicional/i.test(lower)) out.notes = 'Sem observações';
   const obsMatch = groupedText.match(/(?:obs|observa(?:ç|c)[aã]o|complemento)\s*[:\-]\s*(.{3,200})/i);
@@ -1707,6 +1721,10 @@ function orchestrateV2({ runtime, conversation, customer, classification, extrac
     return { nextState: subState, action: (i === INTENTS.CONSULTA || hasQuestion) ? 'ANSWER_AND_RESUME' : smResult.action, missing };
   }
 
+  if (s === STATES.FINALIZANDO || smResult.nextState === STATES.FINALIZANDO) {
+    return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
+  }
+
   return { nextState: smResult.nextState, action: smResult.action, missing: [] };
 }
 
@@ -2267,7 +2285,19 @@ function forceFillPendingField({ conversation, runtime, groupedText, extracted }
 
 function calculateOrderAmounts(tx, conversation = null) {
   const itemTotal = (tx?.items || []).reduce((sum, it) => sum + (Number(it.unit_price || 0) * Number(it.quantity || 1)), 0);
-  const feeInfo = tx?.mode === 'DELIVERY' ? resolveDeliveryFee(conversation, tx) : null;
+  let feeInfo = null;
+  if (tx?.mode === 'DELIVERY') {
+    feeInfo = resolveDeliveryFee(conversation, tx);
+    if (!feeInfo) {
+      const flatFee = resolveFlatDeliveryFee(conversation);
+      if (flatFee > 0) {
+        feeInfo = {
+          neighborhood: cleanText(tx?.address?.neighborhood || ''),
+          fee: flatFee,
+        };
+      }
+    }
+  }
   const feeCents = feeInfo ? Math.round(Number(feeInfo.fee || 0) * 100) : 0;
   return { itemTotal, feeCents, total: itemTotal + feeCents, feeInfo };
 }
@@ -2326,9 +2356,14 @@ function generateOrderSummary(tx, conversation = null, { withConfirmation = true
   lines.push(`💳 *Pagamento:* ${payment}`);
 
   if (safeTx.payment === 'CASH' && safeTx.change_for) {
-    const changeVal = Number(safeTx.change_for);
-    const changeText = isNaN(changeVal) ? safeTx.change_for : formatBRL(changeVal);
+    const normalizedChange = Number(String(safeTx.change_for).replace(/[^\d,.-]/g, '').replace(',', '.'));
+    const changeVal = Number.isFinite(normalizedChange) ? normalizedChange : Number(safeTx.change_for);
+    const changeText = Number.isFinite(changeVal) ? formatBRL(changeVal) : safeTx.change_for;
     lines.push(`💵 *Troco para:* ${changeText}`);
+    if (Number.isFinite(changeVal) && changeVal > 0) {
+      const delta = changeVal - (amounts.total / 100);
+      if (delta >= 0) lines.push(`💸 *Troco:* ${formatBRL(delta)}`);
+    }
   }
 
   if (withConfirmation) {
@@ -2588,7 +2623,7 @@ function resolveDeliveryFee(conversation, tx) {
   let best = null;
   let bestScore = 0;
   for (const area of deliveryAreas) {
-    const areaName = cleanText(area?.neighborhood || area?.bairro || area?.name || '');
+    const areaName = cleanText(area?.neighborhood || area?.bairro || area?.zone_name || area?.name || '');
     const areaNorm = normalizeForMatch(areaName);
     if (!areaNorm) continue;
     let score = 0;
@@ -2618,6 +2653,65 @@ function resolveDeliveryFee(conversation, tx) {
     neighborhood: cleanText(best?.neighborhood || best?.bairro || best?.zone_name || best?.name || ''),
     fee,
   };
+}
+
+function resolveFlatDeliveryFee(conversation) {
+  const raw = (
+    conversation?.companyData?.deliveryFee
+    ?? conversation?.companyData?.delivery_fee
+    ?? conversation?.companyData?.company?.delivery_fee
+    ?? conversation?.companyData?.company?.deliveryFee
+    ?? 0
+  );
+  const fee = toReaisAmount(raw);
+  return Number.isFinite(fee) && fee > 0 ? fee : 0;
+}
+
+function buildDeliveryFeeReply(conversation, userMessage = '') {
+  const deliveryAreas = Array.isArray(conversation?.companyData?.deliveryAreas)
+    ? conversation.companyData.deliveryAreas
+    : [];
+  const text = cleanText(userMessage).toLowerCase();
+
+  const bairroMatch = text.match(/bairro\s+([a-z0-9\s]+)/i);
+  if (bairroMatch && deliveryAreas.length) {
+    const asked = normalizeForMatch(bairroMatch[1]);
+    const found = deliveryAreas.find((a) => {
+      const n = normalizeForMatch(a?.neighborhood || a?.bairro || a?.zone_name || a?.name || '');
+      return n.includes(asked) || asked.includes(n);
+    });
+    if (found) {
+      return `A taxa para ${found.neighborhood || found.bairro || found.zone_name || found.name || 'essa regiao'} e ${formatBRL(toReaisAmount(found?.fee ?? found?.taxa ?? found?.delivery_fee ?? 0))}.`;
+    }
+  }
+
+  const tx = conversation?.transaction || {};
+  if (cleanText(tx?.address?.neighborhood) || cleanText(tx?.address?.street_name)) {
+    const feeInfo = resolveDeliveryFee(conversation, tx);
+    if (feeInfo && Number(feeInfo.fee) > 0) {
+      return `A taxa de entrega para ${feeInfo.neighborhood || tx.address.neighborhood || 'sua regiao'} e ${formatBRL(feeInfo.fee)}.`;
+    }
+  }
+
+  const amounts = calculateOrderAmounts(tx, conversation);
+  if (amounts.feeCents > 0) {
+    return `A taxa de entrega para ${amounts.feeInfo?.neighborhood || tx?.address?.neighborhood || 'sua regiao'} e ${formatBRL(amounts.feeCents / 100)}.`;
+  }
+
+  const flatFee = resolveFlatDeliveryFee(conversation);
+  if (flatFee > 0) {
+    return `A taxa de entrega e ${formatBRL(flatFee)}.`;
+  }
+
+  if (deliveryAreas.length) {
+    const sample = deliveryAreas
+      .slice(0, 5)
+      .map((a) => `• ${a.neighborhood || a.bairro || a.zone_name || a.name || 'Regiao'}: ${formatBRL(toReaisAmount(a?.fee ?? a?.taxa ?? a?.delivery_fee ?? 0))}`)
+      .join('\n');
+    return `As taxas de entrega sao:\n${sample}\n\nMe informa o seu bairro para calcular certinho.`;
+  }
+
+  return 'A taxa de entrega sera calculada com base no seu bairro. Pode informar o endereco que eu confirmo o valor completo.';
 }
 
 function fallbackText(runtime, action, tx, missing, conversation = null) {
@@ -2659,6 +2753,14 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
     })();
     const menuText = buildMenuReply(conversation, follow);
     return menuText || 'No momento nao encontrei o cardapio cadastrado no banco de dados.';
+  }
+
+  if (action === 'DELIVERY_FEE_REPLY') {
+    const feeReply = buildDeliveryFeeReply(conversation);
+    const follow = (Array.isArray(missing) && missing.length)
+      ? fallbackText(runtime, 'ASK_MISSING_FIELDS', tx, missing, conversation)
+      : '';
+    return follow ? `${feeReply}\n\n${follow}` : feeReply;
   }
 
   if (action === 'ASK_MISSING_FIELDS') {
@@ -3000,46 +3102,29 @@ function buildContextualAnswer(conversation, userMessage = '') {
     return 'No momento não encontrei as formas de pagamento no cadastro da empresa.';
   }
 
-  if (/\b(valor|pre[cç]o|quanto|marmita grande|marmita pequena|card[aá]pio|cardapio|menu)\b/.test(text)) {
-    if (!menu.length) return 'No momento não encontrei o cardápio cadastrado no banco de dados.';
-    if (/\b(card[aá]pio|cardapio|menu)\b/.test(text)) {
+  if (/\b(entrega|delivery|bairro|taxa)\b/.test(text)) {
+    return buildDeliveryFeeReply(conversation, text);
+  }
+
+  if (/\b(valor|preco|quanto|marmita grande|marmita pequena|cardapio|menu)\b/.test(text) && !/\b(taxa|entrega|delivery|bairro)\b/.test(text)) {
+    if (!menu.length) return 'No momento nao encontrei o cardapio cadastrado no banco de dados.';
+    if (/\b(cardapio|menu)\b/.test(text)) {
       const full = menu
         .filter((i) => i.available !== false)
-        .map((i) => `• ${i.name}${Number(i.price || 0) > 0 ? ` (${formatBRL(i.price)})` : ''}`)
+        .map((i) => `- ${i.name}${Number(i.price || 0) > 0 ? ` (${formatBRL(i.price)})` : ''}`)
         .join('\n');
-      return `Cardápio de hoje:\n\n${full}`;
+      return `Cardapio de hoje:\n\n${full}`;
     }
     const sizeHint = text.includes('grande') ? 'grande' : (text.includes('pequena') ? 'pequena' : '');
     if (sizeHint) {
       const item = menu.find((i) => String(i?.name || '').toLowerCase().includes(sizeHint));
-      if (item && Number(item.price || 0) > 0) return `A opção ${item.name} está por ${formatBRL(item.price)}.`;
+      if (item && Number(item.price || 0) > 0) return `A opcao ${item.name} esta por ${formatBRL(item.price)}.`;
     }
     const priced = menu.filter((i) => Number(i.price || 0) > 0).slice(0, 4);
     if (priced.length) {
-      return `Alguns valores do cardápio: ${priced.map((i) => `${i.name} (${formatBRL(i.price)})`).join(', ')}.`;
+      return `Alguns valores do cardapio: ${priced.map((i) => `${i.name} (${formatBRL(i.price)})`).join(', ')}.`;
     }
-    return 'Encontrei o cardápio, mas sem preços preenchidos.';
-  }
-
-  if (/\b(entrega|delivery|bairro|taxa)\b/.test(text)) {
-    const bairroMatch = text.match(/bairro\s+([a-z0-9\s]+)/i);
-    if (bairroMatch && deliveryAreas.length) {
-      const asked = normalizeForMatch(bairroMatch[1]);
-      const found = deliveryAreas.find((a) => normalizeForMatch(a.neighborhood || a?.zone_name || '').includes(asked) || asked.includes(normalizeForMatch(a.neighborhood || a?.zone_name || '')));
-      if (found) return `A taxa para ${found.neighborhood || found.zone_name || 'essa região'} é ${formatBRL(toReaisAmount(found?.fee ?? found?.taxa ?? found?.delivery_fee ?? 0))}.`;
-    }
-    if (/\b(taxa|entrega|delivery)\b/.test(text)) {
-      const feeInfo = resolveDeliveryFee(conversation, conversation?.transaction || {});
-      if (feeInfo) return `A taxa de entrega para ${feeInfo.neighborhood || 'sua região'} é ${formatBRL(feeInfo.fee)}.`;
-    }
-    if (deliveryAreas.length) {
-      const sample = deliveryAreas
-        .slice(0, 5)
-        .map((a) => `${a.neighborhood || a.zone_name || 'Região'} (${formatBRL(toReaisAmount(a?.fee ?? a?.taxa ?? a?.delivery_fee ?? 0))})`)
-        .join(', ');
-      return `Entregamos em: ${sample}.`;
-    }
-    return 'Ainda não encontrei as áreas de entrega cadastradas.';
+    return 'Encontrei o cardapio, mas sem precos preenchidos.';
   }
 
   return '';
@@ -3773,9 +3858,14 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     conversation.consecutiveFailures = 0;
   }
 
+  if (runtime.segment === 'restaurant' && classification._subIntent === 'DELIVERY_FEE') {
+    orchestratorResult.action = 'DELIVERY_FEE_REPLY';
+  }
+
   const alwaysDeterministicActions = new Set([
     'ORDER_REVIEW',
     'SHOW_MENU',
+    'DELIVERY_FEE_REPLY',
     'ASK_MISSING_FIELDS',
     'ASK_FIELD_CONFIRMATION',
     'ASK_CONFIRMATION',
