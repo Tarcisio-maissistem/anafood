@@ -897,6 +897,77 @@ function normalizeQuantityFromText(items, originalText) {
   return items.map(it => ({ ...it, quantity: 1 }));
 }
 
+// ── Helpers para integração com JSON Schema extraction ──────────────────
+
+/**
+ * Gera uma amostra compacta do catálogo para incluir como hint na extração.
+ * Máximo 30 itens para não estourar tokens.
+ */
+function buildMenuSample(catalog) {
+  if (!Array.isArray(catalog) || !catalog.length) return '';
+  const items = catalog.slice(0, 30).map((i) => {
+    const name = cleanText(i?.name || '');
+    const price = Number(i?.unit_price || 0);
+    return name ? `- ${name}${price ? ` (R$${price.toFixed(2)})` : ''}` : null;
+  }).filter(Boolean);
+  return items.length ? items.join('\n') : '';
+}
+
+/**
+ * Mapeia resultado do extractIntentSchema para o formato do classifierAgent.
+ * Permite usar o novo extrator sem quebrar o pipeline existente.
+ */
+function mapSchemaIntentToClassification(schemaResult) {
+  const action = schemaResult?.action || 'unknown';
+  const map = {
+    add_item: { intent: INTENTS.NOVO_PEDIDO, requires_extraction: true, confidence: 0.95 },
+    remove_item: { intent: INTENTS.GERENCIAMENTO, requires_extraction: true, confidence: 0.9 },
+    update_quantity: { intent: INTENTS.GERENCIAMENTO, requires_extraction: true, confidence: 0.9 },
+    set_address: { intent: INTENTS.GERENCIAMENTO, requires_extraction: true, confidence: 0.9 },
+    set_payment: { intent: INTENTS.PAGAMENTO, requires_extraction: true, confidence: 0.9 },
+    set_mode: { intent: INTENTS.GERENCIAMENTO, requires_extraction: true, confidence: 0.9 },
+    confirm_order: { intent: INTENTS.GERENCIAMENTO, requires_extraction: false, confidence: 0.95 },
+    cancel_order: { intent: INTENTS.CANCELAMENTO, requires_extraction: false, confidence: 0.95 },
+    ask_menu: { intent: INTENTS.CONSULTA, requires_extraction: false, confidence: 0.9 },
+    ask_question: { intent: INTENTS.CONSULTA, requires_extraction: false, confidence: 0.9 },
+    greeting: { intent: INTENTS.SAUDACAO, requires_extraction: false, confidence: 0.85 },
+    unknown: { intent: INTENTS.GERENCIAMENTO, requires_extraction: true, confidence: 0.5 },
+  };
+  const base = map[action] || map.unknown;
+  return { ...base, handoff: false };
+}
+
+/**
+ * Mapeia resultado do extractIntentSchema para o formato do extractorAgent.
+ * Extrai items, address, payment, mode, etc. do schema result.
+ */
+function mapSchemaIntentToExtracted(schemaResult) {
+  const sr = schemaResult || {};
+  const out = {
+    mode: sr.mode || null,
+    payment: sr.payment || null,
+    customer_name: sr.customer_name || null,
+    notes: sr.notes || null,
+    items: [],
+    address: sr.address || {},
+  };
+  // Items do schema (array ou single)
+  if (Array.isArray(sr.items) && sr.items.length) {
+    out.items = sr.items.map((i) => ({
+      name: cleanText(i.name || ''),
+      quantity: Math.max(1, Number(i.quantity || 1)),
+      incremental: Boolean(i.incremental),
+    })).filter((i) => i.name);
+  } else if (sr.item_name) {
+    out.items = [{
+      name: cleanText(sr.item_name),
+      quantity: Math.max(1, Number(sr.quantity || 1)),
+      incremental: false,
+    }];
+  }
+  return out;
+}
+
 async function classifierAgent({ runtime, conversation, groupedText }) {
   const lower = groupedText.toLowerCase();
   if (/atendente|humano|pessoa/.test(lower)) return { intent: INTENTS.HUMANO, requires_extraction: false, handoff: true, confidence: 1 };
@@ -942,18 +1013,15 @@ async function classifierAgent({ runtime, conversation, groupedText }) {
     return { intent: INTENTS.CONSULTA, requires_extraction: false, handoff: false, confidence: 0.5 };
   }
   try {
-    const c = await openai.chat.completions.create({
+    // ── JSON Schema extraction (substitui LLM não-estruturado) ──────────
+    const schemaResult = await extractIntentSchema(openai, groupedText, {
       model: runtime.model,
-      temperature: 0,
-      max_tokens: 120,
-      messages: [
-        { role: 'system', content: 'Classifique a intencao e retorne somente JSON com intent,requires_extraction,handoff,confidence. Intents: SAUDACAO,NOVO_PEDIDO,REPETIR,CONSULTA,GERENCIAMENTO,CANCELAMENTO,PAGAMENTO,SUPORTE,HUMANO,SPAM.' },
-        { role: 'user', content: JSON.stringify({ state: conversation.state, segment: runtime.segment, summary: conversation.contextSummary, message: groupedText }) },
-      ],
+      menuSample: buildMenuSample(conversation.catalog || []),
     });
-    const p = JSON.parse(c.choices?.[0]?.message?.content || '{}');
-    const intent = INTENTS[p.intent] ? p.intent : INTENTS.GERENCIAMENTO;
-    return { intent, requires_extraction: Boolean(p.requires_extraction), handoff: Boolean(p.handoff), confidence: Number(p.confidence || 0.5) };
+    // Armazenar resultado bruto para uso pelo pipeline de extração
+    conversation._lastSchemaIntent = schemaResult;
+    const mapped = mapSchemaIntentToClassification(schemaResult);
+    return { ...mapped, handoff: false };
   } catch (_) {
     return { intent: INTENTS.GERENCIAMENTO, requires_extraction: true, handoff: false, confidence: 0.4 };
   }
@@ -2898,6 +2966,31 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     || (runtime.segment === 'restaurant' && hasOpenTransaction && missingBeforeExtraction.length > 0)
     || (runtime.segment === 'restaurant' && Boolean(conversation.pendingFieldConfirmation));
   const extracted = shouldExtract ? await extractorAgent({ runtime, groupedText: normalizedText }) : {};
+
+  // ── Merge: preencher lacunas do regex com resultados do JSON Schema ──
+  if (conversation._lastSchemaIntent && shouldExtract) {
+    const schemaExtracted = mapSchemaIntentToExtracted(conversation._lastSchemaIntent);
+    // Items: se regex não encontrou items mas schema sim, usar schema
+    if ((!Array.isArray(extracted.items) || !extracted.items.length) && schemaExtracted.items.length) {
+      extracted.items = schemaExtracted.items;
+    }
+    // Mode: se regex não detectou, usar schema
+    if (!extracted.mode && schemaExtracted.mode) extracted.mode = schemaExtracted.mode;
+    // Payment: se regex não detectou, usar schema
+    if (!extracted.payment && schemaExtracted.payment) extracted.payment = schemaExtracted.payment;
+    // Customer name: se regex não detectou, usar schema
+    if (!extracted.customer_name && schemaExtracted.customer_name) extracted.customer_name = schemaExtracted.customer_name;
+    // Notes: se regex não detectou, usar schema
+    if (!extracted.notes && schemaExtracted.notes) extracted.notes = schemaExtracted.notes;
+    // Address: merge campo a campo (regex tem prioridade)
+    if (schemaExtracted.address && typeof schemaExtracted.address === 'object') {
+      if (!extracted.address) extracted.address = {};
+      for (const [k, v] of Object.entries(schemaExtracted.address)) {
+        if (v && !cleanText(extracted.address[k])) extracted.address[k] = v;
+      }
+    }
+  }
+
   if (runtime.segment === 'restaurant') {
     applyRecentUserContextToExtraction({ conversation, runtime, extracted });
     const menuPool = [
