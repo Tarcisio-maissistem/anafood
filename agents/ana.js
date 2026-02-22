@@ -620,6 +620,15 @@ function replyContainsFailSafePhrase(text) {
   return x.includes('instabilidade') || x.includes('atendimento humano') || x.includes('transferir para atendimento');
 }
 
+function isMenuQueryText(text) {
+  const x = normalizeForMatch(text);
+  if (!x) return false;
+  const askedMenu = /\b(cardapio|menu|tem pra vender|o que vende|opcoes|opcao|o que tem)\b/.test(x);
+  if (!askedMenu) return false;
+  if (/\bpedido\b/.test(x) && !/(\bcardapio\b|\bmenu\b)/.test(x)) return false;
+  return true;
+}
+
 function sanitizeAssistantReply({ reply, conversation, action }) {
   let text = String(reply || '').trim();
   if (!text) return '';
@@ -1526,6 +1535,7 @@ function orchestrateV2({ runtime, conversation, customer, classification, extrac
   const i = classification.intent;
   const yes = detectYes(groupedText);
   const no = detectNo(groupedText);
+  const menuQuery = isMenuQueryText(groupedText);
   const hasQuestion = /\?/.test(groupedText) || /\b(qual|quando|como|onde|que horas|card[aá]pio|pre[cç]o)\b/i.test(groupedText);
 
   // ── Clinic (passthrough) ──
@@ -1534,6 +1544,13 @@ function orchestrateV2({ runtime, conversation, customer, classification, extrac
     if (s === STATES.FINALIZANDO && yes) return { nextState: STATES.CONFIRMED, action: 'CLINIC_CONFIRMED', missing: [] };
     if (s === STATES.FINALIZANDO && no) return { nextState: STATES.ADICIONANDO_ITEM, action: 'REQUEST_ADJUSTMENTS', missing: [] };
     return { nextState: s, action: s === STATES.INIT ? 'WELCOME' : 'ASK_MISSING_FIELDS', missing: ['service', 'date', 'time'] };
+  }
+
+  if (runtime.segment === 'restaurant' && menuQuery) {
+    const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+      itemsPhaseComplete: conversation.itemsPhaseComplete,
+    });
+    return { nextState: s === STATES.INIT ? STATES.ADICIONANDO_ITEM : s, action: 'SHOW_MENU', missing };
   }
 
   // ── INIT: repeat order flow (preservado) ──
@@ -1746,6 +1763,7 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
   const i = classification.intent;
   const yes = detectYes(groupedText);
   const no = detectNo(groupedText);
+  const menuQuery = isMenuQueryText(groupedText);
   const hasQuestion = /\?/.test(groupedText) || /\b(qual|quando|como|onde|que horas|card[aá]pio|pre[cç]o)\b/i.test(groupedText);
 
   if (runtime.segment === 'clinic') {
@@ -1756,6 +1774,13 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
   }
 
   // ── INIT ──────────────────────────────────────────────────────────────
+  if (runtime.segment === 'restaurant' && menuQuery) {
+    const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+      itemsPhaseComplete: conversation.itemsPhaseComplete,
+    });
+    return { nextState: s === STATES.INIT ? STATES.ADICIONANDO_ITEM : s, action: 'SHOW_MENU', missing };
+  }
+
   if (s === STATES.INIT) {
     const today = nowISO().slice(0, 10);
     const hasPreviousOrder = Boolean(customer?.lastOrderSnapshot && Array.isArray(customer.lastOrderSnapshot.items) && customer.lastOrderSnapshot.items.length);
@@ -2626,6 +2651,16 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
     return `Só confirmar: ${label} é *${value}*? 😊`;
   }
 
+  if (action === 'SHOW_MENU') {
+    const follow = (() => {
+      if (conversation?.state === STATES.FINALIZANDO) return fallbackText(runtime, 'ASK_CONFIRMATION', tx, missing, conversation);
+      if (Array.isArray(missing) && missing.length) return fallbackText(runtime, 'ASK_MISSING_FIELDS', tx, missing, conversation);
+      return 'O que voce vai querer hoje?';
+    })();
+    const menuText = buildMenuReply(conversation, follow);
+    return menuText || 'No momento nao encontrei o cardapio cadastrado no banco de dados.';
+  }
+
   if (action === 'ASK_MISSING_FIELDS') {
     const first = (missing || [])[0];
     const payments = getAvailablePaymentMethods(runtime, conversation).join(', ');
@@ -2646,11 +2681,24 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
       'address.postal_code': 'Me passa o CEP também? (só os números)',
       'change_for': '💵 Pagamento em dinheiro. Vai precisar de troco? Se sim, pra quanto?\nSe não precisar, é só dizer "sem troco".',
     };
-    return map[first] || 'Me passa mais um dado para continuar 😊';
+    if (!first) {
+      if (hasItems) return generateOrderSummary(tx, conversation, { withConfirmation: true });
+      return 'O que voce vai querer hoje?';
+    }
+    return map[first] || 'Me passa mais um dado para continuar.';
   }
 
   if (action === 'ANSWER_AND_RESUME') {
     const lastUser = cleanText(conversation?.messages?.slice(-1)?.[0]?.content || '').toLowerCase();
+    const contextual = buildContextualAnswer(conversation, lastUser);
+    if (contextual) {
+      const follow = (Array.isArray(missing) && missing.length)
+        ? fallbackText(runtime, 'ASK_MISSING_FIELDS', tx, missing, conversation)
+        : (conversation?.state === STATES.FINALIZANDO
+          ? fallbackText(runtime, 'ASK_CONFIRMATION', tx, missing, conversation)
+          : '');
+      return follow ? `${contextual}\n\n${follow}` : contextual;
+    }
     if (/^ja (falei|informei)|^já (falei|informei)/.test(lastUser)) {
       const first = (missing || [])[0];
       if (first === 'items') {
@@ -2710,9 +2758,9 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
     return `Anotado! ✅\n${itemLines}\n\n${suggestionLine}\nSe já estiver tudo certo, me diga "somente isso".`;
   }
 
+  // Garantir resumo completo (subtotal/taxa/total) em perguntas durante confirmacao final
   if (action === 'ANSWER_AND_CONFIRM') {
-    const itemLines = (tx.items || []).map((it) => `• ${it.quantity}x ${it.name}`).join('\n') || '—';
-    return `Respondendo rapidinho 😊\n\nSeu pedido até agora:\n${itemLines}\n\nPosso confirmar?`;
+    return generateOrderSummary(tx, conversation, { withConfirmation: true });
   }
 
   if (action === 'ASK_CONFIRMATION') {
@@ -3727,6 +3775,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
 
   const alwaysDeterministicActions = new Set([
     'ORDER_REVIEW',
+    'SHOW_MENU',
     'ASK_MISSING_FIELDS',
     'ASK_FIELD_CONFIRMATION',
     'ASK_CONFIRMATION',
