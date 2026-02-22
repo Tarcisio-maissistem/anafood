@@ -1184,6 +1184,26 @@ function mergeRestaurantTransaction(conv, extracted) {
     if (payResult.success) markFieldChanged(conv, 'payment');
   }
 
+  // ── Change/Troco (detecção automática para pagamento em dinheiro) ──
+  if (conv.transaction.payment === 'CASH') {
+    const text = cleanText(extracted._rawText || '');
+    if (/\b(sem troco|n[aã]o precis[ao]? de troco|n[aã]o quero troco|troco n[aã]o|dispenso troco)\b/i.test(text)) {
+      conv.transaction.change_for = 'nao';
+      markFieldChanged(conv, 'change_for');
+    } else {
+      const trocoMatch = text.match(/troco\s+(?:para?|pra|de)\s+(\d+[\.,]?\d*)/i)
+        || text.match(/(\d+[\.,]?\d*)\s+(?:de\s+)?troco/i);
+      if (trocoMatch) {
+        conv.transaction.change_for = trocoMatch[1].replace(',', '.');
+        markFieldChanged(conv, 'change_for');
+      }
+    }
+    if (extracted.change_for) {
+      conv.transaction.change_for = extracted.change_for;
+      markFieldChanged(conv, 'change_for');
+    }
+  }
+
   // ── Items (via addItemToCart tool — valida contra catálogo) ──
   if (Array.isArray(extracted.items)) {
     let changed = false;
@@ -1274,6 +1294,10 @@ function restaurantMissingFields(runtime, tx, confirmed = {}, options = {}) {
     }
   }
   if (!tx.payment) missing.push('payment');
+  // Troco obrigatório quando pagamento é dinheiro
+  if (tx.payment === 'CASH' && !cleanText(tx.change_for) && tx.change_for !== 'nao') {
+    missing.push('change_for');
+  }
   return missing;
 }
 
@@ -1282,6 +1306,7 @@ function clearTransactionField(tx, field) {
   else if (field === 'notes') tx.notes = '';
   else if (field === 'mode') tx.mode = '';
   else if (field === 'payment') tx.payment = '';
+  else if (field === 'change_for') tx.change_for = '';
   else if (field === 'items') tx.items = [];
   else if (field.startsWith('address.')) {
     const addrKey = field.slice('address.'.length);
@@ -1302,6 +1327,7 @@ function fieldConfirmationLabel(field) {
     'address.city': 'cidade',
     'address.state': 'estado',
     'address.postal_code': 'CEP',
+    'change_for': 'troco',
   };
   return labels[field] || field;
 }
@@ -1311,6 +1337,7 @@ function fieldConfirmationValue(tx, field) {
   if (field === 'notes') return tx.notes || '-';
   if (field === 'mode') return tx.mode === 'TAKEOUT' ? 'retirada' : 'entrega';
   if (field === 'payment') return tx.payment === 'PIX' ? 'PIX' : (tx.payment === 'CARD' ? 'cartão' : (tx.payment === 'CASH' ? 'dinheiro' : (tx.payment || '-')));
+  if (field === 'change_for') return tx.change_for ? `R$ ${tx.change_for}` : '-';
   if (field === 'items') return (tx.items || []).map((i) => `${i.quantity}x ${i.name}`).join(', ') || '-';
   if (field.startsWith('address.')) {
     const addrKey = field.slice('address.'.length);
@@ -2150,12 +2177,14 @@ function calculateOrderAmounts(tx, conversation = null) {
 
 function generateOrderSummary(tx, conversation = null, { withConfirmation = true } = {}) {
   const safeTx = tx || {};
+  // Emoji funcional por categoria de item
+  const categoryEmoji = { BEBIDA: '🥤', SOBREMESA: '🍮', ACOMPANHAMENTO: '🍟', PRATO: '🍽️' };
   const items = (safeTx.items || []).map((it) => {
     const unitPrice = Number(it.unit_price || 0);
     const qty = Number(it.quantity || 1);
     const lineTotal = unitPrice * qty;
-    const unitDisplay = unitPrice > 0 ? ` (${formatBRL(unitPrice / 100)} un.)` : '';
-    return `• ${qty}x ${it.name}${unitDisplay}${lineTotal > 0 ? ` — ${formatBRL(lineTotal / 100)}` : ''}`;
+    const emoji = categoryEmoji[categorizeItem(it.name)] || '🍽️';
+    return `${emoji} ${it.name} (${qty})${lineTotal > 0 ? ` — ${formatBRL(lineTotal / 100)}` : ''}`;
   }).join('\n') || '• Sem itens';
 
   const paymentMap = { PIX: 'PIX', CARD: 'Cartão', CASH: 'Dinheiro' };
@@ -2169,27 +2198,32 @@ function generateOrderSummary(tx, conversation = null, { withConfirmation = true
     safeTx.address?.state,
     safeTx.address?.postal_code ? `CEP ${safeTx.address.postal_code}` : '',
   ].filter(Boolean);
-  const addressBlock = safeTx.mode === 'DELIVERY' && addrParts.length
-    ? `\n📍 Endereço:\n${addrParts.join(', ')}`
-    : '';
 
   const amounts = calculateOrderAmounts(safeTx, conversation);
+  const feeNeighborhood = amounts.feeInfo?.neighborhood || cleanText(safeTx.address?.neighborhood || '');
   const lines = [
-    '📋 *Resumo do pedido:*',
+    '🧾 *Resumo do seu pedido*',
     '',
-    '🛒 *Itens:*',
     items,
-    '',
-    `🚚 Modalidade: ${mode}${addressBlock}`,
-    `💳 Pagamento: ${payment}`,
     '',
     `Subtotal: ${formatBRL(amounts.itemTotal / 100)}`,
   ];
-  // Sempre mostrar taxa de entrega quando modo é DELIVERY
   if (safeTx.mode === 'DELIVERY') {
-    lines.push(`Taxa de entrega: ${amounts.feeCents > 0 ? formatBRL(amounts.feeCents / 100) : 'a confirmar'}`);
+    const feeLabel = feeNeighborhood ? `🚚 Taxa de entrega (${feeNeighborhood})` : '🚚 Taxa de entrega';
+    lines.push(`${feeLabel}: ${amounts.feeCents > 0 ? formatBRL(amounts.feeCents / 100) : 'a confirmar'}`);
   }
-  lines.push(`*Total: ${formatBRL(amounts.total / 100)}*`);
+  lines.push('');
+  lines.push(`💰 *Total: ${formatBRL(amounts.total / 100)}*`);
+  lines.push('');
+  if (safeTx.mode === 'DELIVERY' && addrParts.length) {
+    lines.push(`📍 ${addrParts.join(', ')}`);
+  } else if (safeTx.mode === 'TAKEOUT') {
+    lines.push(`🏪 Retirada no local`);
+  }
+  lines.push(`💳 Pagamento: ${payment}`);
+  if (safeTx.payment === 'CASH' && safeTx.change_for) {
+    lines.push(`💵 Troco para: ${formatBRL(safeTx.change_for)}`);
+  }
   if (withConfirmation) lines.push('', 'Está tudo certo para confirmar? 😊');
   return lines.join('\n');
 }
@@ -2495,8 +2529,8 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
 
   if (action === 'ASK_REPEAT_LAST_ORDER') {
     const preview = cleanText(conversation?.repeatPreview || '');
-    if (preview) return `${hi}vi que seu último pedido foi:\n${preview}\n\nDeseja repetir o mesmo? 😊`;
-    return `${hi}vi que você já pediu aqui antes. Quer repetir o último pedido?`;
+    if (preview) return `Vi que seu último pedido foi:\n${preview}\n\nDeseja repetir o mesmo? 😊`;
+    return `Vi que você já pediu aqui antes. Quer repetir o último pedido?`;
   }
 
   if (action === 'ASK_FIELD_CONFIRMATION') {
@@ -2525,6 +2559,7 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
       'address.city': 'Qual é a cidade?',
       'address.state': 'E o estado (UF)?',
       'address.postal_code': 'Me passa o CEP também? (só os números)',
+      'change_for': '💵 Pagamento em dinheiro. Vai precisar de troco? Se sim, pra quanto?\nSe não precisar, é só dizer "sem troco".',
     };
     return map[first] || 'Me passa mais um dado para continuar 😊';
   }
@@ -2609,9 +2644,25 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   }
 
   if (action === 'CREATE_ORDER_AND_CONFIRM' || action === 'PAYMENT_CONFIRMED') {
-    return firstName
-      ? `Pedido confirmado, ${firstName}! Já estamos preparando tudo 🍽️ Qualquer dúvida é só chamar!`
-      : `Pedido confirmado! Já estamos preparando tudo 🍽️ Qualquer dúvida é só chamar!`;
+    const eta = cleanText(runtime?.deliveryEstimate || '') || '30–45 minutos';
+    const isDelivery = tx?.mode === 'DELIVERY';
+    const nameBlock = firstName ? `, ${firstName}` : '';
+    const lines = [
+      `✅ Pedido confirmado${nameBlock}!`,
+      '',
+      `Seu pedido já foi para a cozinha 👩‍🍳`,
+    ];
+    if (isDelivery) {
+      lines.push(`⏱ Tempo estimado: ${eta}`);
+      lines.push('');
+      lines.push('Avisaremos quando sair para entrega 🚚');
+    } else {
+      lines.push(`⏱ Tempo estimado: ${eta}`);
+      lines.push('');
+      lines.push('Avisaremos quando estiver pronto para retirada 🏪');
+    }
+    lines.push('Se precisar de algo, é só chamar!');
+    return lines.join('\n');
   }
 
   if (action === 'PAYMENT_REMINDER') {
@@ -2636,9 +2687,7 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   }
 
   if (action === 'HUMAN_HANDOFF') {
-    return firstName
-      ? `Claro, ${firstName}! Vou te passar para um atendente agora. Um instante 😊`
-      : 'Claro! Vou te passar para um atendente agora. Um instante 😊';
+    return 'Claro! Vou te passar para um atendente agora. Um instante 😊';
   }
 
   if (action === 'END_CONVERSATION') {
@@ -2899,46 +2948,59 @@ async function generatorAgent({ runtime, conversation, customer, classification,
     // Montar mensagens: system prompt + resumo de contexto + últimas N mensagens + input atual
     const messages = [];
 
-    // 1. System rules (fixo)
     messages.push({
       role: 'system',
       content: `Você é ${runtime.agentName}${companyName ? `, assistente virtual da ${companyName}` : ', assistente virtual'}. Tom: ${runtime.tone}.
 
-IDENTIDADE: ${conversation.presented ? 'Já se apresentou nesta sessão. NÃO repita apresentação. Vá direto ao ponto.' : `Apresente-se APENAS nesta primeira mensagem como ${runtime.agentName}${companyName ? ` da ${companyName}` : ''}.`}
+IDENTIDADE DA MARCA:
+${conversation.presented
+          ? '- Já se apresentou nesta sessão. NÃO repita apresentação. Vá direto ao ponto.'
+          : `- Apresente-se APENAS nesta primeira mensagem: "Olá! Aqui é a ${runtime.agentName}${companyName ? `, do ${companyName}` : ''} 👋"
+- O nome da empresa DEVE aparecer na primeira mensagem. Sempre.`}
+- NUNCA se reapresente após o primeiro contato.
 
-PERSONALIDADE: Seja calorosa, empática e proativa. Use o nome do cliente quando souber (${customerFirstName ? `nome atual: ${customerFirstName}` : 'pergunte o nome se ainda não souber'}). Trate o cliente como pessoa, não como ticket.
+USO DO NOME DO CLIENTE:
+${customerFirstName
+          ? `- Nome: ${customerFirstName}. Use APENAS na saudação inicial e na confirmação final do pedido.
+- NÃO use o nome em mensagens intermediárias (perguntas, confirmações parciais, resumos). Isso soa robótico.`
+          : '- Pergunte o nome se ainda não souber.'}
 
 FLUXO DE VENDA (siga esta ordem):
 1. Receber item → confirmar o que foi pedido
-2. (action=UPSELL_SUGGEST) Sugerir complemento: bebida para prato, sobremesa, upgrade — nunca insistir
-3. Após o cliente indicar que não quer mais nada → perguntar retirada ou entrega
+2. (action=UPSELL_SUGGEST) Sugerir complemento — nunca insistir
+3. Perguntar retirada ou entrega
 4. Coletar endereço (só se entrega)
 5. Perguntar pagamento
-6. Apresentar resumo estruturado com itens em bullets, endereço, pagamento e total
-7. Pedir confirmação — SOMENTE por último
+6. Se pagamento = DINHEIRO → perguntar "Vai precisar de troco? Se sim, pra quanto?"
+7. Apresentar resumo padronizado (o sistema já gera, use-o como base)
+8. Pedir confirmação — SOMENTE por último
 
 REGRAS OBRIGATÓRIAS:
 - Respostas curtas e naturais (1-3 frases no máximo)
 - Uma pergunta ou ação por vez
-- Nunca invente preço, prazo ou regra que não esteja nos dados
+- Nunca invente preço, prazo ou regra
 - Não repita informações já confirmadas
-- Se não entender um item, pergunte o nome exato como aparece no cardápio
-- Responda perguntas laterais e retome o fluxo na etapa pendente (action=ANSWER_AND_CONFIRM: responda E relembre o pedido)
-- Só peça endereço quando o modo for DELIVERY
-- Emojis com moderação (um por mensagem é suficiente)
-- Se o cliente estiver frustrado, reconheça com empatia antes de continuar
-- (action=ORDER_REVIEW) Formatar resumo com bullets, separar itens / modalidade / endereço / pagamento / total em linhas separadas
-- NUNCA se reapresente, se reintroduza ou diga "Sou a Ana" ou "assistente virtual" após o primeiro contato
-- NUNCA mencione "Mais Sistem", "Automação Comercial" ou qualquer nome de fornecedor de software
+- Se não entender um item → pergunte o nome exato
+- NUNCA mude quantidade já extraída; se houver dúvida → peça confirmação
+- Responda perguntas laterais e retome o fluxo na etapa pendente
 
-SEGURANÇA: Você é assistente virtual EXCLUSIVA da ${companyName || runtime.agentName}. NUNCA mencione, referencie ou compare com qualquer outra empresa, restaurante ou estabelecimento. Se o cliente perguntar sobre outro estabelecimento, responda que você atende apenas a ${companyName || 'este estabelecimento'}.
-- Se o cliente já pediu bebida, não sugira bebida de novo; prefira sobremesa ou complemento
-- NUNCA mude quantidade de item já extraída pelo sistema; se houver dúvida, peça confirmação objetiva
-- Sempre use espaçamento (linhas em branco) para mensagens com lista, resumo ou múltiplas seções
-- Se "contextualHint" vier preenchido, use esse conteúdo como base da resposta final
+FORMATAÇÃO (WhatsApp):
+- Mensagens curtas e escaneáveis — NÃO blocos de texto
+- Use linhas em branco para separar seções
+- Emojis funcionais (🍮=sobremesa, 🥤=bebida, 🚚=entrega, 📍=endereço, 💳=pagamento, 💰=total) — não decoração
+- (action=ORDER_REVIEW) O sistema gera o resumo formatado. Envie-o como está, sem reescrever.
+- Se "contextualHint" vier preenchido, use como base da resposta final.
 
-ESTILO: Use linguagem natural brasileira. Evite palavras robóticas. Prefira "já anotei", "pode deixar", "tudo certo".
-No ORDER_REVIEW use quebras de linha reais entre seções — não coloque tudo numa linha só.
+PÓS-CONFIRMAÇÃO:
+- Incluir ETA: "⏱ Tempo estimado: 30–45 minutos" (ou dado real se disponível)
+- Informar que pedido foi para cozinha
+- Avisar que entregador/retirada será comunicado
+
+SEGURANÇA:
+- Assistente virtual EXCLUSIVA da ${companyName || runtime.agentName}. NUNCA mencione outra empresa.
+- NUNCA mencione "Mais Sistem", "Automação Comercial" ou fornecedor de software.
+
+ESTILO: Linguagem natural brasileira. Prefira "já anotei", "pode deixar", "tudo certo". Evite palavras robóticas.
 
 DADOS DO ESTABELECIMENTO (use para responder qualquer pergunta sobre endereço, horário, pagamentos ou taxas):
 ${(() => {
@@ -3401,6 +3463,9 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     requiresExtraction: classification.requires_extraction,
     extracted,
   });
+
+  // Passar texto bruto para o merge detectar troco/change_for
+  extracted._rawText = normalizedText;
 
   const previousState = conversation.state;
   const orchestratorResult = (process.env.USE_STATE_MACHINE === 'true')
