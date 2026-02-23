@@ -104,6 +104,11 @@ const detectYes = (t) => {
   if (/\b(ma?is|mas)\s+sim\b/.test(x)) return true;
   if (/\bsim\b/.test(x) && !/\bnao\b/.test(x) && !/\bnão\b/.test(x)) return true;
   if (x.includes('confirm') || x.includes('quero sim') || x.includes('pode sim') || x.includes('claro que sim')) return true;
+  if (/\bpode\s+confirm[ae]r?\b/.test(x)) return true;
+  if (/\be\s+isso\s+(a[ií]|mesmo)\b/.test(x) || /\bé\s+isso\s+(a[ií]|mesmo)\b/.test(x)) return true;
+  if (/\b(finaliz[ae]r?|conclu[ií]r?|fecha[rr]?|envi[ae]r?)\b/.test(x)) return true;
+  if (/\b(ta|tá|tah)\s+(bom|certo|ok)\b/.test(x)) return true;
+  if (/\b(manda|envia|vai)\s+(l[aá]|embora|pedido)\b/.test(x)) return true;
   return false;
 };
 const detectNo = (t) => {
@@ -1595,6 +1600,22 @@ function orchestrateV2({ runtime, conversation, customer, classification, extrac
 
   // ── FINALIZANDO: correction flow (preservado) ──
   if (s === STATES.FINALIZANDO) {
+    const reviewAlreadyShown = hasRecentOrderReviewShown(conversation, 4);
+    if (!reviewAlreadyShown) {
+      return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
+    }
+
+    const missingBeforeConfirm = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+      itemsPhaseComplete: conversation.itemsPhaseComplete,
+    });
+    if (yes && missingBeforeConfirm.length > 0) {
+      const firstMissing = missingBeforeConfirm[0];
+      let subState = STATES.ADICIONANDO_ITEM;
+      if (firstMissing === 'change_for' || firstMissing === 'payment') subState = STATES.COLETANDO_PAGAMENTO;
+      else if (firstMissing.startsWith('address.')) subState = STATES.COLETANDO_ENDERECO;
+      return { nextState: subState, action: 'ASK_MISSING_FIELDS', missing: missingBeforeConfirm };
+    }
+
     if (i === 'CORRECAO' || /\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar|ta errado|tá errado|está errado|errado|errei|n[aã]o [eé] isso)\b/i.test(groupedText)) {
       const correction = classification.correction || detectCorrectionStable(groupedText);
       if (correction.type === 'QTY_UPDATE' && correction.newQty != null) {
@@ -1721,7 +1742,7 @@ function orchestrateV2({ runtime, conversation, customer, classification, extrac
     return { nextState: subState, action: (i === INTENTS.CONSULTA || hasQuestion) ? 'ANSWER_AND_RESUME' : smResult.action, missing };
   }
 
-  if (s === STATES.FINALIZANDO || smResult.nextState === STATES.FINALIZANDO) {
+  if (smResult.nextState === STATES.FINALIZANDO && !hasRecentOrderReviewShown(conversation, 4)) {
     return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
   }
 
@@ -1980,7 +2001,24 @@ function orchestrate({ runtime, conversation, customer, classification, extracte
 
   // ── FINALIZANDO (ex-WAITING_CONFIRMATION) ──────────────────────────────
   if (s === STATES.FINALIZANDO) {
+    const reviewAlreadyShown = hasRecentOrderReviewShown(conversation, 4);
+    if (!reviewAlreadyShown) {
+      return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
+    }
+
     if (i === INTENTS.CANCELAMENTO) return { nextState: STATES.ADICIONANDO_ITEM, action: 'REQUEST_ADJUSTMENTS', missing: [] };
+
+    const missingBeforeConfirm = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+      itemsPhaseComplete: conversation.itemsPhaseComplete,
+    });
+    if (yes && missingBeforeConfirm.length > 0) {
+      const firstMissing = missingBeforeConfirm[0];
+      let subState = STATES.ADICIONANDO_ITEM;
+      if (firstMissing === 'change_for' || firstMissing === 'payment') subState = STATES.COLETANDO_PAGAMENTO;
+      else if (firstMissing.startsWith('address.')) subState = STATES.COLETANDO_ENDERECO;
+      return { nextState: subState, action: 'ASK_MISSING_FIELDS', missing: missingBeforeConfirm };
+    }
+
     if (yes) return conversation.transaction.payment === 'PIX'
       ? { nextState: STATES.WAITING_PAYMENT, action: 'CREATE_ORDER_AND_WAIT_PAYMENT', missing: [] }
       : { nextState: STATES.CONFIRMED, action: 'CREATE_ORDER_AND_CONFIRM', missing: [] };
@@ -2139,6 +2177,65 @@ async function maybeLoadCatalog(conversation, runtime, apiRequest, getEnvConfig,
     source: conversation?.companyData?.meta?.menuSource || 'supabase',
   });
   return conversation.catalog;
+}
+
+function hasRecentOrderReviewShown(conversation, lookback = 6) {
+  const recent = Array.isArray(conversation?.messages)
+    ? conversation.messages.slice(-Math.max(1, Number(lookback) || 1))
+    : [];
+  return recent.some((m) => {
+    if (m?.role !== 'assistant') return false;
+    const text = normalizeForMatch(m?.content || '');
+    return text.includes('subtotal');
+  });
+}
+
+/**
+ * Retroativamente popula unit_price nos itens do carrinho que
+ * ficaram sem preço (null/0) mas têm match no catálogo atual.
+ * Chamada sempre que o catálogo for (re)carregado.
+ */
+function backfillItemPricesFromCatalog(conv) {
+  const catalog = conv?.catalog;
+  if (!Array.isArray(catalog) || !catalog.length) return;
+  const items = conv?.transaction?.items;
+  if (!Array.isArray(items) || !items.length) return;
+
+  for (const item of items) {
+    if (Number(item?.unit_price || 0) > 0) continue;
+
+    const normName = normalizeForMatch(item?.name || '');
+    if (!normName) continue;
+    let bestMatch = null;
+    let bestScore = 0;
+
+    for (const cat of catalog) {
+      const catNorm = normalizeForMatch(cat?.name || '');
+      if (!catNorm) continue;
+      let score = 0;
+      if (catNorm === normName) score = 100;
+      else if (catNorm.includes(normName) || normName.includes(catNorm)) score = 70;
+      else {
+        const catTokens = new Set(canonicalTokens(catNorm));
+        const itemTokens = canonicalTokens(normName);
+        const overlap = itemTokens.filter((t) => catTokens.has(t)).length;
+        if (overlap > 0 && itemTokens.length > 0) {
+          score = Math.round((overlap / itemTokens.length) * 60);
+        }
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = cat;
+      }
+    }
+
+    if (bestMatch && bestScore >= 60 && Number(bestMatch?.unit_price || 0) > 0) {
+      item.unit_price = Number(bestMatch.unit_price);
+      if (!item.integration_code && bestMatch.integration_code) {
+        item.integration_code = bestMatch.integration_code;
+      }
+    }
+  }
 }
 
 function resolveItemsWithCatalog(items, catalog) {
@@ -2866,6 +2963,10 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   }
 
   if (action === 'ASK_CONFIRMATION') {
+    const hasShownReview = hasRecentOrderReviewShown(conversation, 6);
+    if (!hasShownReview) {
+      return generateOrderSummary(tx, conversation, { withConfirmation: true });
+    }
     return 'Está tudo certo para eu concluir o pedido? 😊';
   }
 
@@ -3548,6 +3649,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   } catch (_) { }
 
   await maybeLoadCatalog(conversation, runtime, apiRequest, getEnvConfig, log);
+  backfillItemPricesFromCatalog(conversation);
 
   // Pré-preencher nome do cliente a partir do perfil persistido (nunca perguntar novamente)
   if (cleanText(customer.name) && !cleanText(conversation.transaction.customer_name)) {
