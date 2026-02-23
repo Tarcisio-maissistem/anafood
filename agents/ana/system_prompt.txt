@@ -49,6 +49,12 @@ Idempotencia:
 Normalizacao:
 - Padronizar texto e endereco antes de persistir (correcoes simples e caixa).
 
+ENDERECO:
+- NUNCA diga que o endereco "parece confuso", "esta incompleto" ou qualquer variacao.
+- Enderecos brasileiros com "Qd", "Lt", "casa X", "Ap X" e "Bloco X" sao validos e devem ser aceitos.
+- Ao receber o endereco, confirme repetindo-o uma vez de forma limpa, sem pedir reformulacao.
+- Se faltarem rua, numero ou bairro, pergunte apenas o campo faltante.
+
 Falhas:
 - Nao inventar instabilidade por conta propria.
 - So mencionar falha tecnica quando o backend sinalizar erro real.

@@ -323,6 +323,18 @@ function extractAddressFromText(text) {
     else out.neighborhood = cleanText(`${prefix} ${base}`);
   }
 
+  if (out.street_name && out.neighborhood) {
+    const neighNorm = normalizeForMatch(out.neighborhood);
+    const streetNorm = normalizeForMatch(out.street_name);
+    if (neighNorm && streetNorm.includes(neighNorm)) {
+      const escaped = out.neighborhood.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      out.street_name = cleanText(out.street_name.replace(new RegExp(escaped, 'i'), '').trim());
+    }
+  }
+  if (out.street_name && out.street_number) {
+    out.street_name = cleanText(out.street_name.replace(/\bcasa\s+\d+\b/i, '').trim());
+  }
+
   const cityUfSlash = sanitized.match(/\b([A-Za-z\u00C0-\u00FF\s]+)\s*\/\s*([A-Za-z]{2})\b/);
   if (cityUfSlash) {
     out.city = cleanText(cityUfSlash[1]);
@@ -631,6 +643,12 @@ function replyContainsFailSafePhrase(text) {
     || x.includes('sistema esta com')
     || x.includes('houve um erro')
     || x.includes('parece que houve')
+    || x.includes('parece estar confuso')
+    || x.includes('parece confuso')
+    || x.includes('endereco confuso')
+    || x.includes('endereco incompleto')
+    || x.includes('poderia confirmar o endereco')
+    || x.includes('parece incorreto')
   );
 }
 
@@ -1063,6 +1081,23 @@ async function classifierAgent({ runtime, conversation, groupedText }) {
   const correction = detectCorrectionStable(groupedText);
   if (correction.isCorrection) {
     return { intent: 'CORRECAO', requires_extraction: false, handoff: false, confidence: 0.95, correction };
+  }
+
+  const isRemoveIntent = /\b(retira|retire|remov[ae]r?|tira|tire|cancela\s+o\s+item|n[aã]o\s+quero\s+(mais\s+)?(a|o|os|as)?|sem\s+a|sem\s+o|exclui|exclu[ií]r?|deleta|delet[ae]r?)\b/i.test(lower);
+  if (isRemoveIntent && [
+    STATES.ADICIONANDO_ITEM,
+    STATES.MENU,
+    STATES.CONFIRMANDO_CARRINHO,
+    STATES.COLETANDO_ENDERECO,
+    STATES.COLETANDO_PAGAMENTO,
+    STATES.FINALIZANDO,
+  ].includes(conversation.state)) {
+    return { intent: 'REMOVER_ITEM', requires_extraction: true, handoff: false, confidence: 0.95, _isRemove: true };
+  }
+
+  const isSpecification = /\b(e|é|era)\s+(lata|latinha|\d+\s*l)|\blata\s+n[aã]o\b|\b1[,.]5\s*n[aã]o\b/i.test(lower);
+  if (isSpecification && Array.isArray(conversation.transaction?.items) && conversation.transaction.items.length) {
+    return { intent: 'SUBSTITUIR_ITEM', requires_extraction: true, handoff: false, confidence: 0.9, _isReplace: true };
   }
 
   const isTaxaQuery = /\b(taxa\s*(de)?\s*entrega|valor\s*(da)?\s*(taxa|entrega)|quanto\s*(custa|e|eh|fica)\s*(a\s*)?(taxa|entrega|delivery))\b/i.test(lower);
@@ -2238,6 +2273,149 @@ function backfillItemPricesFromCatalog(conv) {
   }
 }
 
+/**
+ * Remove um item do carrinho a partir de texto livre.
+ * Retorna true se removeu algo.
+ */
+function applyItemRemoval(conversation, text) {
+  const items = conversation?.transaction?.items;
+  if (!Array.isArray(items) || !items.length) return false;
+
+  const normText = normalizeForMatch(text);
+  const cleaned = normText
+    .replace(/\b(retira|retire|remov[ae]r?|tira|tire|nao\s+quero\s+mais?|nao\s+quero|sem|exclui|excluir|deleta|cancel[ae])\b/gi, ' ')
+    .replace(/\b(a|o|as|os|mais|item|esse|esta|este)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return false;
+
+  const targetTokens = new Set(canonicalTokens(cleaned));
+  if (!targetTokens.size) return false;
+
+  let bestIdx = -1;
+  let bestScore = 0;
+
+  for (let idx = 0; idx < items.length; idx++) {
+    const itemNorm = normalizeForMatch(items[idx]?.name || '');
+    const itemTokens = canonicalTokens(itemNorm);
+    const overlap = itemTokens.filter((t) => targetTokens.has(t)).length;
+    const score = itemTokens.length > 0 ? overlap / itemTokens.length : 0;
+    const exactMatch = itemNorm.includes(cleaned) || cleaned.includes(itemNorm);
+    const finalScore = exactMatch ? 1 : score;
+    if (finalScore > bestScore) {
+      bestScore = finalScore;
+      bestIdx = idx;
+    }
+  }
+
+  if (bestIdx >= 0 && bestScore >= 0.5) {
+    items.splice(bestIdx, 1);
+    conversation.itemsPhaseComplete = false;
+    conversation.upsellDone = false;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Substitui um item do carrinho por outro (ex.: coca 1,5L -> coca lata).
+ * Retorna true se substituiu.
+ */
+function applyItemReplacement(conversation, text, extractedItems = []) {
+  const items = conversation?.transaction?.items;
+  const catalog = Array.isArray(conversation?.catalog) ? conversation.catalog : [];
+  if (!Array.isArray(items) || !items.length || !catalog.length) return false;
+
+  const normText = normalizeForMatch(text);
+  const wantsLata = /\b(lata|latinha)\b/.test(normText);
+  const wants15l = /\b1[,.]?\s*5\s*l\b|\b1[,.]?5l\b/.test(normText);
+  const wants2l = /\b2\s*l\b|\b2l\b/.test(normText);
+  const wantsCocaFamily = /\b(coca|cola)\b/.test(normText)
+    || (Array.isArray(extractedItems) && extractedItems.some((it) => /\b(coca|cola)\b/.test(normalizeForMatch(it?.name || ''))));
+
+  const pickCatalogMatch = (query) => {
+    const q = normalizeForMatch(query);
+    if (!q) return null;
+    let best = null;
+    let bestScore = 0;
+    const qTokens = new Set(canonicalTokens(q));
+    for (const cat of catalog) {
+      const catNorm = normalizeForMatch(cat?.name || '');
+      if (!catNorm) continue;
+      let score = 0;
+      if (catNorm === q) score = 100;
+      else if (catNorm.includes(q) || q.includes(catNorm)) score = 80;
+      else {
+        const ct = canonicalTokens(catNorm);
+        const overlap = ct.filter((t) => qTokens.has(t)).length;
+        score = ct.length ? Math.round((overlap / ct.length) * 60) : 0;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = cat;
+      }
+    }
+    return bestScore >= 50 ? best : null;
+  };
+
+  let replacement = null;
+  if (Array.isArray(extractedItems) && extractedItems.length) {
+    replacement = pickCatalogMatch(extractedItems[0]?.name || '');
+  }
+  if (!replacement && wantsCocaFamily && wantsLata) {
+    replacement = catalog.find((c) => {
+      const n = normalizeForMatch(c?.name || '');
+      return n.includes('coca') && n.includes('lata');
+    }) || null;
+  }
+  if (!replacement && wantsCocaFamily && wants15l) {
+    replacement = catalog.find((c) => {
+      const n = normalizeForMatch(c?.name || '');
+      return n.includes('coca') && (n.includes('1 5') || n.includes('1,5') || n.includes('1.5') || n.includes('1 5l') || n.includes('1 5 l') || n.includes('1 5lt') || n.includes('1 5 lt'));
+    }) || null;
+  }
+  if (!replacement && wantsCocaFamily && wants2l) {
+    replacement = catalog.find((c) => {
+      const n = normalizeForMatch(c?.name || '');
+      return n.includes('coca') && (n.includes('2l') || n.includes('2 l'));
+    }) || null;
+  }
+  if (!replacement) return false;
+
+  const replacementNorm = normalizeForMatch(replacement?.name || '');
+  if (!replacementNorm) return false;
+
+  const targetIdx = items.findIndex((it) => {
+    const n = normalizeForMatch(it?.name || '');
+    if (!n || n === replacementNorm) return false;
+    if (wantsCocaFamily) return n.includes('coca') || n.includes('cola');
+    const repTokens = new Set(canonicalTokens(replacementNorm));
+    const itTokens = canonicalTokens(n);
+    const overlap = itTokens.filter((t) => repTokens.has(t)).length;
+    return itTokens.length > 0 && (overlap / itTokens.length) >= 0.5;
+  });
+  if (targetIdx < 0) return false;
+
+  const oldItem = items[targetIdx];
+  const qty = Math.max(1, Number(oldItem?.quantity || 1));
+  const existingIdx = items.findIndex((it, idx) => idx !== targetIdx && normalizeForMatch(it?.name || '') === replacementNorm);
+  if (existingIdx >= 0) {
+    items[existingIdx].quantity = Math.max(1, Number(items[existingIdx].quantity || 1) + qty);
+    items.splice(targetIdx, 1);
+  } else {
+    items[targetIdx] = {
+      name: replacement.name,
+      quantity: qty,
+      integration_code: replacement.integration_code || null,
+      unit_price: Number(replacement.unit_price || 0) || null,
+    };
+  }
+
+  conversation.itemsPhaseComplete = false;
+  conversation.upsellDone = false;
+  return true;
+}
+
 function resolveItemsWithCatalog(items, catalog) {
   const normalizedCatalog = (catalog || []).map((item) => ({
     raw: item,
@@ -2402,17 +2580,17 @@ function calculateOrderAmounts(tx, conversation = null) {
 function generateOrderSummary(tx, conversation = null, { withConfirmation = true } = {}) {
   const safeTx = tx || {};
 
-  const items = (safeTx.items || []).map((it) => {
+  const itemLines = (safeTx.items || []).map((it) => {
     const unitPrice = Number(it.unit_price || 0);
     const qty = Number(it.quantity || 1);
     const lineTotal = unitPrice * qty;
     const emoji = categorizeItem(it.name);
-    return `${emoji} ${it.name} (${qty})${lineTotal > 0 ? ` — ${formatBRL(lineTotal / 100)}` : ''}`;
+    const priceStr = lineTotal > 0 ? ` — *${formatBRL(lineTotal / 100)}*` : '';
+    return `${emoji} ${it.name} (${qty})${priceStr}`;
   }).join('\n') || '• Sem itens';
 
   const paymentMap = { PIX: 'PIX', CARD: 'Cartão', CASH: 'Dinheiro' };
   const payment = paymentMap[safeTx.payment] || safeTx.payment || 'Não informado';
-  const modeLabel = safeTx.mode === 'TAKEOUT' ? 'Retirada' : 'Entrega';
 
   const addrParts = [
     safeTx.address?.street_name,
@@ -2421,22 +2599,24 @@ function generateOrderSummary(tx, conversation = null, { withConfirmation = true
     safeTx.address?.city,
     safeTx.address?.state,
     safeTx.address?.postal_code ? `CEP ${safeTx.address.postal_code}` : '',
-  ].filter(Boolean);
+  ].filter(cleanText);
 
   const amounts = calculateOrderAmounts(safeTx, conversation);
   const feeNeighborhood = amounts.feeInfo?.neighborhood || cleanText(safeTx.address?.neighborhood || '');
 
   const lines = [
-    '🧾 *Resumo do seu pedido*',
+    '🧾 *Resumo do pedido*',
     '',
-    items,
+    itemLines,
     '',
-    `Subtotal: ${formatBRL(amounts.itemTotal / 100)}`,
   ];
+
+  lines.push(`Subtotal: *${formatBRL(amounts.itemTotal / 100)}*`);
 
   if (safeTx.mode === 'DELIVERY') {
     const feeLabel = feeNeighborhood ? `🚚 Taxa de entrega (${feeNeighborhood})` : '🚚 Taxa de entrega';
-    lines.push(`${feeLabel}: ${amounts.feeCents > 0 ? formatBRL(amounts.feeCents / 100) : 'a confirmar'}`);
+    const feeValue = amounts.feeCents > 0 ? `*${formatBRL(amounts.feeCents / 100)}*` : '_a confirmar_';
+    lines.push(`${feeLabel}: ${feeValue}`);
   }
 
   lines.push(`💰 *Total: ${formatBRL(amounts.total / 100)}*`);
@@ -2446,8 +2626,6 @@ function generateOrderSummary(tx, conversation = null, { withConfirmation = true
     lines.push(`📍 *Entrega:* ${addrParts.join(', ')}`);
   } else if (safeTx.mode === 'TAKEOUT') {
     lines.push(`🏪 *Retirada no local*`);
-  } else {
-    lines.push(`🚚 *Modo:* ${modeLabel}`);
   }
 
   lines.push(`💳 *Pagamento:* ${payment}`);
@@ -2463,9 +2641,7 @@ function generateOrderSummary(tx, conversation = null, { withConfirmation = true
     }
   }
 
-  if (withConfirmation) {
-    lines.push('', 'Está tudo certo para confirmar? 😊');
-  }
+  if (withConfirmation) lines.push('', 'Está tudo certo para confirmar? 😊');
 
   return lines.join('\n');
 }
@@ -2957,6 +3133,16 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
     return `Anotado! ✅\n${itemLines}\n\n${suggestionLine}\nSe já estiver tudo certo, me diga "somente isso".`;
   }
 
+  if (action === 'ITEM_REMOVED') {
+    const itemLines = (tx.items || []).map((it) => `• ${it.quantity}x ${it.name}`).join('\n') || '• Carrinho vazio';
+    return `Removido! ✅ Seu carrinho agora:\n${itemLines}\n\nQuer acrescentar, remover ou alterar algum item? Se estiver tudo certo, me diga "somente isso".`;
+  }
+
+  if (action === 'ITEM_UPDATED') {
+    const itemLines = (tx.items || []).map((it) => `• ${it.quantity}x ${it.name}`).join('\n') || '• Carrinho vazio';
+    return `Atualizado! ✅ Seu carrinho agora:\n${itemLines}\n\nQuer acrescentar, remover ou alterar algum item? Se estiver tudo certo, me diga "somente isso".`;
+  }
+
   // Garantir resumo completo (subtotal/taxa/total) em perguntas durante confirmacao final
   if (action === 'ANSWER_AND_CONFIRM') {
     return generateOrderSummary(tx, conversation, { withConfirmation: true });
@@ -2975,16 +3161,21 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
   }
 
   if (action === 'CREATE_ORDER_AND_WAIT_PAYMENT') {
-    const companyInfo = companyName ? ` do ${companyName}` : '';
-    return `Pedido anotado! Assim que confirmar o pagamento via PIX, já encaminho para a cozinha${companyInfo} 🙌`;
+    const orderSummary = generateOrderSummary(tx, conversation, { withConfirmation: false });
+    const pixKey = cleanText(conversation?.companyData?.company?.pix_key || conversation?.companyData?.pixKey || '');
+    const pixLine = pixKey ? `\n\n🔑 *Chave PIX:* \`${pixKey}\`` : '';
+    return `${orderSummary}\n\n⏳ Aguardando confirmação do pagamento via PIX${pixLine}\n\nAssim que pagar, é só me enviar o comprovante 🙌`;
   }
 
   if (action === 'CREATE_ORDER_AND_CONFIRM' || action === 'PAYMENT_CONFIRMED') {
     const eta = cleanText(runtime?.deliveryEstimate || '') || '30–45 minutos';
     const isDelivery = tx?.mode === 'DELIVERY';
     const nameBlock = firstName ? `, ${firstName}` : '';
+    const orderSummary = generateOrderSummary(tx, conversation, { withConfirmation: false });
     const lines = [
-      `✅ Pedido confirmado${nameBlock}!`,
+      `✅ *Pedido confirmado${nameBlock}!*`,
+      '',
+      orderSummary,
       '',
       `Seu pedido já foi para a cozinha 👩‍🍳`,
     ];
@@ -3788,10 +3979,40 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
   // Passar texto bruto para o merge detectar troco/change_for
   extracted._rawText = normalizedText;
 
+  // Remocao/substituicao de item sao tratadas de forma deterministica para evitar re-adicao via merge.
+  let deterministicCartMutation = '';
+  if (runtime.segment === 'restaurant' && (classification._isRemove || classification._isReplace)) {
+    const extractedItemsSnapshot = Array.isArray(extracted.items) ? [...extracted.items] : [];
+    extracted.items = [];
+    classification.intent = INTENTS.GERENCIAMENTO;
+
+    if (classification._isRemove) {
+      const removed = applyItemRemoval(conversation, normalizedText);
+      if (removed) deterministicCartMutation = 'ITEM_REMOVED';
+    } else if (classification._isReplace) {
+      const replaced = applyItemReplacement(conversation, normalizedText, extractedItemsSnapshot);
+      if (replaced) deterministicCartMutation = 'ITEM_UPDATED';
+    }
+
+    if (deterministicCartMutation) {
+      const amounts = calculateOrderAmounts(conversation.transaction, conversation);
+      conversation.transaction.total_amount = amounts.total;
+      markFieldChanged(conversation, 'items');
+    }
+  }
+
   const previousState = conversation.state;
-  const orchestratorResult = (process.env.USE_STATE_MACHINE === 'true')
-    ? orchestrateV2({ runtime, conversation, customer, classification, extracted, groupedText: normalizedText })
-    : orchestrate({ runtime, conversation, customer, classification, extracted, groupedText: normalizedText });
+  const orchestratorResult = deterministicCartMutation
+    ? {
+      nextState: STATES.ADICIONANDO_ITEM,
+      action: deterministicCartMutation,
+      missing: restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
+        itemsPhaseComplete: conversation.itemsPhaseComplete,
+      }),
+    }
+    : ((process.env.USE_STATE_MACHINE === 'true')
+      ? orchestrateV2({ runtime, conversation, customer, classification, extracted, groupedText: normalizedText })
+      : orchestrate({ runtime, conversation, customer, classification, extracted, groupedText: normalizedText }));
   conversation.state = orchestratorResult.nextState;
   if (conversation.state !== previousState) conversation.stateUpdatedAt = nowISO();
 
@@ -3968,6 +4189,8 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
     'ORDER_REVIEW',
     'SHOW_MENU',
     'DELIVERY_FEE_REPLY',
+    'ITEM_REMOVED',
+    'ITEM_UPDATED',
     'ASK_MISSING_FIELDS',
     'ASK_FIELD_CONFIRMATION',
     'ASK_CONFIRMATION',
