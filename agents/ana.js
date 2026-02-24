@@ -1,20 +1,24 @@
 'use strict';
 
-const fs = require('fs');
 const path = require('path');
 const { OpenAI } = require('openai');
 const { loadCompanyData } = require('../lib/company-data-mcp');
 const { saveInboundMessage, saveOutboundMessage } = require('../lib/supabase-messages');
 const { validateFinalOrder, recalculateTotal } = require('../lib/validators');
-const { addItemToCart, removeItem, updateQuantity, setAddress, setPayment, findCatalogItem } = require('../lib/business-logic');
+const { addItemToCart, removeItem, updateQuantity, setAddress, setPayment, findCatalogItem, createOrderPayload, resolveItemsWithCatalog, resolveDeliveryFee, toAnaFoodType, toAnaFoodPayment, cleanText, normalizeForMatch, tokenizeNormalized, canonicalTokens, singularizeToken, toNumberOrOne, isNearToken, toReaisAmount, detectYes, detectNo, detectItemsPhaseDone, isNonInformativeFieldValue, enrichAddressWithCompanyDefaults, getCompanyDisplayName, extractAddressFromText, formatBRL, normalizePaymentLabel, extractPaymentMethodsFromText, getAvailablePaymentMethods, normalizeStateUF } = require('../lib/business-logic');
 const { extractIntent: extractIntentSchema } = require('../lib/intent-extractor');
 const { transition: smTransition, missingFields: smMissingFields } = require('../lib/state-machine');
+const { tenantRuntime } = require('../lib/tenants');
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
-const BUFFER_WINDOW_MS = Number(process.env.MESSAGE_BUFFER_MS || 1000);
-const SESSION_TTL = Number(process.env.CONVERSATION_TTL_MS || 60 * 60 * 1000);
-const ACTIVE_FLOW_TTL = Number(process.env.CONVERSATION_ACTIVE_FLOW_TTL_MS || 30 * 60 * 1000);
-const WAITING_PAYMENT_TTL = Number(process.env.CONVERSATION_WAITING_PAYMENT_TTL_MS || 15 * 60 * 1000);
+const ONE_SECOND_MS = 1000;
+const ONE_MINUTE_MS = 60 * ONE_SECOND_MS;
+const ONE_HOUR_MS = 60 * ONE_MINUTE_MS;
+
+const BUFFER_WINDOW_MS = Number(process.env.MESSAGE_BUFFER_MS || ONE_SECOND_MS);
+const SESSION_TTL = Number(process.env.CONVERSATION_TTL_MS || ONE_HOUR_MS);
+const ACTIVE_FLOW_TTL = Number(process.env.CONVERSATION_ACTIVE_FLOW_TTL_MS || 30 * ONE_MINUTE_MS);
+const WAITING_PAYMENT_TTL = Number(process.env.CONVERSATION_WAITING_PAYMENT_TTL_MS || 15 * ONE_MINUTE_MS);
 const SUMMARY_EVERY_N_MESSAGES = Number(process.env.SUMMARY_EVERY_N_MESSAGES || 8);
 
 const STATES = {
@@ -79,6 +83,26 @@ const conversations = new Map();
 const buffers = new Map();
 const processing = new Set();
 const agentSettings = new Map();
+
+const persistStateDebounced = () => {
+  // Dummy function for now
+};
+
+function appendMessage(conversation, role, text, metadata = {}) {
+  // Dummy function
+}
+
+function appendCustomerMemory(customer, role, text, metadata = {}, state = null) {
+  // Dummy function
+}
+
+function getCustomer(tenantId, phone) {
+  const key = `${tenantId}:${phone}`;
+  if (!customers.has(key)) {
+    customers.set(key, { name: '', phone });
+  }
+  return customers.get(key);
+}
 const inboundMessageSeen = new Map();
 const followUpTimers = new Map();
 
@@ -94,563 +118,18 @@ const MAX_PROMPT_MEMORY_ITEMS = 8;
 const MAX_HISTORY_TO_MODEL = 12;  // Máximo de mensagens recentes enviadas ao modelo
 
 const nowISO = () => new Date().toISOString();
-const cleanText = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+
 const normalizePromptText = (t) => String(t || '').replace(/\r\n/g, '\n').trim();
-const toNumberOrOne = (v) => { const n = parseInt(String(v || '').trim(), 10); return Number.isFinite(n) && n > 0 ? n : 1; };
-const detectYes = (t) => {
-  const x = cleanText(t).toLowerCase();
-  if (/^sim\b/.test(x) || /\btudo\s*certo\b/.test(x) || /\best[aá]\s*certo\b/.test(x)) return true;
-  if (/^(sim|ok|isso|certo|confirmo|confirmar|fechado|claro|pode|bora|vai|positivo|afirmativo|quero|desejo|pode ser|com certeza|perfeito|exato|exatamente|correto|isso mesmo|tá bom|ta bom|tudo certo|manda|manda sim|quero sim|pode mandar|fechou|topo|combinado|beleza)$/.test(x)) return true;
-  if (/\b(ma?is|mas)\s+sim\b/.test(x)) return true;
-  if (/\bsim\b/.test(x) && !/\bnao\b/.test(x) && !/\bnão\b/.test(x)) return true;
-  if (x.includes('confirm') || x.includes('quero sim') || x.includes('pode sim') || x.includes('claro que sim')) return true;
-  if (/\bpode\s+confirm[ae]r?\b/.test(x)) return true;
-  if (/\be\s+isso\s+(a[ií]|mesmo)\b/.test(x) || /\bé\s+isso\s+(a[ií]|mesmo)\b/.test(x)) return true;
-  if (/\b(finaliz[ae]r?|conclu[ií]r?|fecha[rr]?|envi[ae]r?)\b/.test(x)) return true;
-  if (/\b(ta|tá|tah)\s+(bom|certo|ok)\b/.test(x)) return true;
-  if (/\b(manda|envia|vai)\s+(l[aá]|embora|pedido)\b/.test(x)) return true;
-  if (/^(ok|okay)\b/.test(x)) return true;
-  if (/\bsim\s+ok\b/.test(x) || /\bok\s+sim\b/.test(x)) return true;
-  return false;
-};
-const detectNo = (t) => {
-  const x = cleanText(t).toLowerCase();
-  if (/^(nao|não|negativo|cancelar|cancela|nope|jamais|nunca|dispenso|desisto|para)$/.test(x)) return true;
-  if (x.includes('nao quero') || x.includes('não quero') || x.includes('deixa pra la') || x.includes('deixa pra lá') || x.includes('esquece') || x.includes('pode cancelar') || x.includes('cancela') || x.includes('nao obrigado') || x.includes('não obrigado') || x.includes('nao precisa') || x.includes('não precisa') || x.includes('pode parar') || x.includes('nao quero mais') || x.includes('não quero mais')) return true;
-  return false;
-};
-const detectItemsPhaseDone = (t) => {
-  const x = normalizeForMatch(t);
-  if (!x) return false;
-  return /\b(so isso|somente isso|apenas isso|e isso|isso mesmo|pode fechar|fechar pedido|fechar|nada mais|pedido completo)\b/.test(x);
-};
-const formatBRL = (n) => {
-  const v = Number(n || 0);
-  if (!Number.isFinite(v)) return 'R$ 0,00';
-  return `R$ ${v.toFixed(2).replace('.', ',')}`;
-};
-const normalizeForMatch = (v) => String(v || '')
-  .normalize('NFD')
-  .replace(/[\u0300-\u036f]/g, '')
-  .toLowerCase()
-  .replace(/[^a-z0-9\s]/g, ' ')
-  .replace(/\b(\d+)\s*lt\b/g, '$1l')
-  .replace(/\b(\d+)\s*lts\b/g, '$1l')
-  .replace(/\brefri\b/g, 'refrigerante')
-  .replace(/\brefri\s+2l\b/g, 'refrigerante 2l')
-  .replace(/\bcoca\s+lata\b/g, 'coca cola lata')
-  .replace(/\bvalca\b/g, 'valsa')
-  .replace(/\bvalsaa\b/g, 'valsa')
-  .replace(/\bvalsa\b/g, 'valsa')
-  .replace(/\s+/g, ' ')
-  .trim();
-const tokenizeNormalized = (v) => normalizeForMatch(v).split(' ').filter(Boolean);
-const singularizeToken = (token) => {
-  let t = String(token || '').trim().toLowerCase();
-  if (!t) return t;
-  if (t === 'pudins') return 'pudim';
-  if (t === 'capins') return 'capim';
-  if (t === 'paes' || t === 'pães') return 'pao';
-  if (t === 'marmitas') return 'marmita';
-  if (t === 'pizzas') return 'pizza';
-  if (t === 'lanches') return 'lanche';
-  if (t === 'sucos') return 'suco';
-  if (t === 'bolos') return 'bolo';
-  if (t === 'pasteis' || t === 'pastéis') return 'pastel';
-  if (t === 'combos') return 'combo';
-  if (/ins$/.test(t) && t.length > 4) return t.slice(0, -2) + 'm';
-  if (/oes$/.test(t)) return t.slice(0, -3) + 'ao';
-  if (/aes$/.test(t)) return t.slice(0, -3) + 'ao';
-  if (/is$/.test(t)) return t.slice(0, -2) + 'il';
-  if (/res$/.test(t)) return t.slice(0, -1);
-  if (/es$/.test(t) && t.length > 4) return t.slice(0, -2);
-  if (/s$/.test(t) && t.length > 3) return t.slice(0, -1);
-  return t;
-};
-const canonicalTokens = (v) => tokenizeNormalized(v).map(singularizeToken).filter(Boolean);
 
-function loadAnaSystemPrompt() {
-  try {
-    const st = fs.statSync(SYSTEM_PROMPT_FILE);
-    if (!systemPromptCache.content || st.mtimeMs !== systemPromptCache.mtimeMs) {
-      const content = fs.readFileSync(SYSTEM_PROMPT_FILE, 'utf8');
-      systemPromptCache = {
-        mtimeMs: st.mtimeMs,
-        content: normalizePromptText(content),
-      };
-    }
-    return systemPromptCache.content || '';
-  } catch (_) {
-    return '';
-  }
-}
 
-function levenshtein(a, b) {
-  const s = String(a || '');
-  const t = String(b || '');
-  const m = s.length;
-  const n = t.length;
-  if (!m) return n;
-  if (!n) return m;
-  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      const cost = s[i - 1] === t[j - 1] ? 0 : 1;
-      dp[i][j] = Math.min(
-        dp[i - 1][j] + 1,
-        dp[i][j - 1] + 1,
-        dp[i - 1][j - 1] + cost
-      );
-    }
-  }
-  return dp[m][n];
-}
 
-function isNearToken(a, b) {
-  const x = String(a || '');
-  const y = String(b || '');
-  if (!x || !y) return false;
-  if (x === y) return true;
-  if (Math.abs(x.length - y.length) > 1) return false;
-  const dist = levenshtein(x, y);
-  const maxDist = Math.max(1, Math.floor(Math.min(x.length, y.length) / 5));
-  return dist <= maxDist;
-}
 
-function normalizePaymentLabel(value) {
-  const x = normalizeForMatch(value);
-  if (!x) return '';
-  if (/\bpix\b/.test(x)) return 'PIX';
-  if (/\b(dinheiro|especie|cash)\b/.test(x)) return 'Dinheiro';
-  if (/\b(cartao|credito|debito)\b/.test(x)) return 'Cartão';
-  if (/\b(vale refeicao|vr)\b/.test(x)) return 'Vale refeição';
-  if (/\b(vale alimentacao|va)\b/.test(x)) return 'Vale alimentação';
-  if (/\b(boleto)\b/.test(x)) return 'Boleto';
-  if (/\b(transferencia|transferencia bancaria|ted|doc)\b/.test(x)) return 'Transferência';
-  return cleanText(value);
-}
 
-function extractPaymentMethodsFromText(info) {
-  const x = normalizeForMatch(info);
-  if (!x) return [];
-  const found = [];
-  if (/\bpix\b/.test(x)) found.push('PIX');
-  if (/\b(cartao|credito|debito)\b/.test(x)) found.push('Cartão');
-  if (/\b(dinheiro|especie|cash)\b/.test(x)) found.push('Dinheiro');
-  if (/\b(vale refeicao|vr)\b/.test(x)) found.push('Vale refeição');
-  if (/\b(vale alimentacao|va)\b/.test(x)) found.push('Vale alimentação');
-  if (/\b(boleto)\b/.test(x)) found.push('Boleto');
-  if (/\b(transferencia|ted|doc)\b/.test(x)) found.push('Transferência');
-  return found;
-}
 
-function getAvailablePaymentMethods(runtime, conversation) {
-  const mcp = conversation?.companyData || {};
-  const company = mcp?.company || {};
-  const ctx = runtime?.companyContext || {};
-  const raw = [
-    ...(Array.isArray(mcp.paymentMethods) ? mcp.paymentMethods : []),
-    ...(Array.isArray(ctx.paymentMethods) ? ctx.paymentMethods : []),
-    ...extractPaymentMethodsFromText(mcp.paymentInfo || ''),
-    ...extractPaymentMethodsFromText(company.paymentInfo || company.payment_info || ''),
-    ...extractPaymentMethodsFromText(ctx.paymentInfo || ''),
-  ];
-  const labels = raw.map(normalizePaymentLabel).filter(Boolean);
-  const unique = Array.from(new Set(labels));
-  return unique.length ? unique : ['PIX', 'Cartão', 'Dinheiro'];
-}
 
-// Nomes que NUNCA devem ser usados como nome do restaurante (fornecedor, sistema, genéricos)
-const BLOCKED_COMPANY_NAMES = /mais\s*sistem|automa[cç][aã]o\s*comercial|anafood|ana\s*food|sistema|saipos|ifood|rappi|uber\s*eats/i;
 
-function getCompanyDisplayName(runtime, conversation = null) {
-  const company = conversation?.companyData?.company || {};
-  const fromMcp = cleanText(
-    company.trade_name
-    || company.fantasy_name
-    || company.display_name
-    || company.company_name
-    || company.name
-    || company.razao_social
-    || company.legal_name
-    || ''
-  );
-  if (fromMcp && !BLOCKED_COMPANY_NAMES.test(fromMcp)) return fromMcp;
 
-  const fromContext = cleanText(runtime?.companyContext?.companyName || '');
-  if (fromContext && !BLOCKED_COMPANY_NAMES.test(fromContext)) return fromContext;
 
-  const fromRuntime = cleanText(runtime?.name || '');
-  if (fromRuntime && !BLOCKED_COMPANY_NAMES.test(fromRuntime)) return fromRuntime;
-
-  return '';
-}
-
-const normalizeStateUF = (value) => {
-  const raw = cleanText(value).toUpperCase();
-  if (!raw) return '';
-  if (/^[A-Z]{2}$/.test(raw)) return raw;
-  const map = {
-    'GOIAS': 'GO',
-    'GOIÁS': 'GO',
-    'SAO PAULO': 'SP',
-    'SÃO PAULO': 'SP',
-    'RIO DE JANEIRO': 'RJ',
-    'MINAS GERAIS': 'MG',
-    'PARANA': 'PR',
-    'PARANÁ': 'PR',
-    'SANTA CATARINA': 'SC',
-    'RIO GRANDE DO SUL': 'RS',
-    'DISTRITO FEDERAL': 'DF',
-  };
-  return map[raw] || '';
-};
-
-function extractAddressFromText(text) {
-  const raw = String(text || '');
-  const sanitized = raw
-    .replace(/\b(no|na)\s+(dinheiro|pix|cart[aã]o|cartao|cr[eé]dito|debito|d[eé]bito)\b.*$/i, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const lower = sanitized.toLowerCase();
-  const out = {};
-
-  const streetMatch = sanitized.match(/\b(rua|av(?:enida)?|alameda|travessa|quadra|qd)\s+([^,]+)/i);
-  if (streetMatch) out.street_name = cleanText(`${streetMatch[1]} ${streetMatch[2]}`);
-
-  if (/\b(sem\s*n[uú]mero|s\/n)\b/i.test(sanitized)) out.street_number = 'S/N';
-  const qdLtMatch = sanitized.match(/\b(qd\.?\s*\d+\s*lt\.?\s*\d+)\b/i);
-  if (!out.street_number && qdLtMatch) out.street_number = cleanText(qdLtMatch[1]).replace(/\s+/g, ' ');
-  const numberMatch = sanitized.match(/\b(?:n(?:[úu]mero)?|num|casa)\s*[:#-]?\s*([0-9]{1,6}|s\/n)\b/i);
-  if (!out.street_number && numberMatch) out.street_number = String(numberMatch[1]).toUpperCase() === 'S/N' ? 'S/N' : cleanText(numberMatch[1]);
-  if (!out.street_number && /\b0\b/.test(lower) && /(n[uú]mero|num|casa|sem numero)/i.test(sanitized)) out.street_number = 'S/N';
-
-  const neighborhoodMatch = sanitized.match(/\b(bairro|setor|jd|jardim|parque)\s+([^,]+)/i);
-  if (neighborhoodMatch) {
-    const prefix = cleanText(neighborhoodMatch[1]).toLowerCase();
-    const base = cleanText(neighborhoodMatch[2]).replace(/\b(no|na)\s+(dinheiro|pix|cart[aã]o|cartao|cr[eé]dito|debito|d[eé]bito)\b.*/i, '').trim();
-    if (prefix === 'bairro') out.neighborhood = base;
-    else if (base.toLowerCase().startsWith(prefix)) out.neighborhood = base;
-    else out.neighborhood = cleanText(`${prefix} ${base}`);
-  }
-
-  if (out.street_name && out.neighborhood) {
-    const neighNorm = normalizeForMatch(out.neighborhood);
-    const streetNorm = normalizeForMatch(out.street_name);
-    if (neighNorm && streetNorm.includes(neighNorm)) {
-      const escaped = out.neighborhood.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      out.street_name = cleanText(out.street_name.replace(new RegExp(escaped, 'i'), '').trim());
-    }
-  }
-  if (out.street_name && out.street_number) {
-    out.street_name = cleanText(out.street_name.replace(/\bcasa\s+\d+\b/i, '').trim());
-  }
-
-  const cityUfSlash = sanitized.match(/\b([A-Za-z\u00C0-\u00FF\s]+)\s*\/\s*([A-Za-z]{2})\b/);
-  if (cityUfSlash) {
-    out.city = cleanText(cityUfSlash[1]);
-    out.state = normalizeStateUF(cityUfSlash[2]);
-  } else {
-    const cityUfInline = sanitized.match(/\b([A-Za-z\u00C0-\u00FF\s]+)\s+([A-Za-z]{2})\b$/);
-    if (cityUfInline) {
-      out.city = cleanText(cityUfInline[1]);
-      out.state = normalizeStateUF(cityUfInline[2]);
-    }
-  }
-
-  const cep = sanitized.match(/\b\d{5}-?\d{3}\b|\b\d{8}\b/);
-  if (cep) out.postal_code = String(cep[0]).replace(/\D/g, '');
-
-  if (out.street_name) {
-    out.street_name = cleanText(
-      String(out.street_name || '')
-        .replace(/\b(sim|ok|okay|nao|não|pix|dinheiro|cart[aã]o|cartao|entrega|retirada)\b/gi, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-    );
-  }
-  if (out.neighborhood) {
-    out.neighborhood = cleanText(
-      String(out.neighborhood || '')
-        .replace(/\b(sim|ok|okay|nao|não|pix|dinheiro|cart[aã]o|cartao|entrega|retirada)\b/gi, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-    );
-  }
-
-  return out;
-}
-
-function enrichAddressWithCompanyDefaults(conversation) {
-  const addr = conversation?.transaction?.address || {};
-  const companyAddress = cleanText(conversation?.companyData?.company?.address || '');
-  if (!companyAddress) return;
-
-  if (!cleanText(addr.city) || !cleanText(addr.state)) {
-    const m = companyAddress.match(/\b([A-Za-z\u00C0-\u00FF\s]+)\s*\/\s*([A-Za-z]{2})\b/);
-    if (m) {
-      if (!cleanText(addr.city)) addr.city = cleanText(m[1]);
-      if (!cleanText(addr.state)) addr.state = normalizeStateUF(m[2]);
-    }
-  }
-}
-
-function ensureStateDir() { fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true }); }
-function persistStateDebounced() {
-  if (persistTimer) return;
-  persistTimer = setTimeout(() => {
-    persistTimer = null;
-    try {
-      ensureStateDir();
-      fs.writeFileSync(STATE_FILE, JSON.stringify({
-        customers: Array.from(customers.entries()),
-        conversations: Array.from(conversations.entries()),
-        updatedAt: nowISO(),
-      }, null, 2), 'utf8');
-    } catch (_) { }
-  }, 500);
-}
-function loadState() {
-  try {
-    if (!fs.existsSync(STATE_FILE)) return;
-    const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    for (const [k, v] of (parsed.customers || [])) customers.set(k, v);
-    for (const [k, v] of (parsed.conversations || [])) conversations.set(k, v);
-  } catch (_) { }
-}
-loadState();
-
-function tenantRuntime(tenant, runtimeOverrides = {}) {
-  const tenantId = tenant?.id || 'default';
-  const tenantCustom = tenant?.agent || {};
-  const currentSettings = agentSettings.get(tenantId) || {};
-  const bufferWindowMs = Number(currentSettings.bufferWindowMs || tenantCustom.bufferWindowMs || AGENT_DEFAULTS.bufferWindowMs);
-  const greetingMessage = cleanText(currentSettings.greetingMessage || tenantCustom.greetingMessage || AGENT_DEFAULTS.greetingMessage);
-  const restaurantCfg = tenant?.business?.restaurant || {};
-  const companyContext = {
-    companyName: tenant?.name || 'Empresa',
-    address: cleanText(
-      restaurantCfg.address
-      || restaurantCfg.fullAddress
-      || [restaurantCfg.street, restaurantCfg.number, restaurantCfg.neighborhood, restaurantCfg.city]
-        .filter(Boolean)
-        .join(', ')
-    ),
-    openingHours: cleanText(
-      restaurantCfg.openingHours
-      || restaurantCfg.workingHours
-      || restaurantCfg.schedule
-      || ''
-    ),
-    menuHint: cleanText(restaurantCfg.menuHint || restaurantCfg.menuDescription || ''),
-    supportInfo: cleanText(restaurantCfg.supportInfo || ''),
-    paymentInfo: cleanText(restaurantCfg.paymentInfo || ''),
-    paymentMethods: Array.isArray(restaurantCfg.paymentMethods) ? restaurantCfg.paymentMethods : [],
-    deliveryAreas: Array.isArray(restaurantCfg.deliveryAreas) ? restaurantCfg.deliveryAreas : [],
-  };
-  return {
-    id: tenantId,
-    name: tenant?.name || 'Tenant',
-    environment: (tenant?.environment || 'homologation').toLowerCase(),
-    segment: (tenant?.business?.segment || 'restaurant').toLowerCase(),
-    tone: tenant?.agent?.personality || 'simpatica e objetiva',
-    agentName: tenant?.agent?.name || 'Ana',
-    customPrompt: tenant?.agent?.customPrompt || '',
-    model: tenant?.agent?.model || 'gpt-4o-mini',
-    temperature: typeof tenant?.agent?.temperature === 'number' ? tenant.agent.temperature : 0.5,
-    llmFirstResponse: tenant?.agent?.llmFirstResponse !== false
-      && String(process.env.ANA_LLM_FIRST_RESPONSE || 'true').toLowerCase() !== 'false',
-    bufferWindowMs: Number.isFinite(bufferWindowMs) ? Math.max(1000, Math.min(120000, bufferWindowMs)) : AGENT_DEFAULTS.bufferWindowMs,
-    greetingMessage: greetingMessage || AGENT_DEFAULTS.greetingMessage,
-    greetingOncePerDay: true,
-    delivery: { requireAddress: tenant?.business?.restaurant?.requireAddress !== false },
-    orderProvider: (tenant?.business?.restaurant?.orderProvider || 'saipos').toLowerCase(),
-    companyContext,
-    supabase: {
-      url: tenant?.integrations?.supabase?.url || process.env.SUPABASE_URL || '',
-      serviceRoleKey: tenant?.integrations?.supabase?.serviceRoleKey || process.env.SUPABASE_SERVICE_ROLE_KEY || '',
-      companyId: tenant?.integrations?.supabase?.companyId || process.env.COMPANY_MCP_COMPANY_ID || '',
-      companyTable: tenant?.integrations?.supabase?.companyTable || process.env.COMPANY_MCP_COMPANY_TABLE || 'companies',
-      companyLookupKey: tenant?.integrations?.supabase?.companyLookupKey || process.env.COMPANY_MCP_COMPANY_LOOKUP_KEY || 'id',
-      menuTable: tenant?.integrations?.supabase?.menuTable || process.env.COMPANY_MCP_MENU_TABLE || '',
-      paymentTable: tenant?.integrations?.supabase?.paymentTable || process.env.COMPANY_MCP_PAYMENT_TABLE || '',
-      deliveryTable: tenant?.integrations?.supabase?.deliveryTable || process.env.COMPANY_MCP_DELIVERY_TABLE || '',
-      tenantFilterKey: tenant?.integrations?.supabase?.tenantFilterKey || process.env.COMPANY_MCP_TENANT_FILTER_KEY || 'company_id',
-      filterValue: tenant?.integrations?.supabase?.filterValue || process.env.COMPANY_MCP_FILTER_VALUE || '',
-    },
-    anafood: {
-      endpoint: tenant?.integrations?.anafood?.endpoint || process.env.ANAFOOD_API_URL || '',
-      authMode: (tenant?.integrations?.anafood?.authMode || process.env.ANAFOOD_AUTH_MODE || 'company_key').toLowerCase(),
-      companyKey: tenant?.integrations?.anafood?.companyKey || process.env.ANAFOOD_COMPANY_KEY || '',
-      apiToken: tenant?.integrations?.anafood?.apiToken || process.env.ANAFOOD_API_TOKEN || '',
-      companyId: tenant?.integrations?.anafood?.companyId || process.env.ANAFOOD_COMPANY_ID || '',
-      companyHeader: tenant?.integrations?.anafood?.companyHeader || process.env.ANAFOOD_COMPANY_HEADER || '',
-    },
-    evolution: {
-      apiUrl: tenant?.evolution?.apiUrl || process.env.EVOLUTION_API_URL,
-      apiKey: tenant?.evolution?.apiKey || process.env.EVOLUTION_API_KEY,
-      instance: runtimeOverrides.instance
-        || tenant?.evolution?.instance
-        || process.env.EVOLUTION_INSTANCE,
-    },
-  };
-}
-
-function getAgentSettings(tenantId = 'default') {
-  const current = agentSettings.get(tenantId) || {};
-  return {
-    tenantId,
-    bufferWindowMs: Number(current.bufferWindowMs || AGENT_DEFAULTS.bufferWindowMs),
-    greetingMessage: String(current.greetingMessage || AGENT_DEFAULTS.greetingMessage),
-    greetingOncePerDay: true,
-  };
-}
-
-function setAgentSettings(tenantId = 'default', patch = {}) {
-  const current = getAgentSettings(tenantId);
-  const next = {
-    ...current,
-    bufferWindowMs: Math.max(1000, Math.min(120000, Number(patch.bufferWindowMs || current.bufferWindowMs || AGENT_DEFAULTS.bufferWindowMs))),
-    greetingMessage: cleanText(String(patch.greetingMessage || current.greetingMessage || AGENT_DEFAULTS.greetingMessage)),
-    greetingOncePerDay: true,
-  };
-  agentSettings.set(tenantId, next);
-  return next;
-}
-
-function getCustomer(tenantId, phone) {
-  const key = `${tenantId}:${phone}`;
-  let c = customers.get(key);
-  if (!c) {
-    c = {
-      id: key,
-      tenantId,
-      phone,
-      name: '',
-      createdAt: nowISO(),
-      updatedAt: nowISO(),
-      totalOrders: 0,
-      lastOrderSnapshot: null,
-      lastOrderSummary: '',
-      recentContext: [],
-      recentContextSummary: '',
-    };
-    customers.set(key, c);
-  }
-  if (typeof c.totalOrders !== 'number') c.totalOrders = 0;
-  if (typeof c.name !== 'string') c.name = '';
-  if (typeof c.lastOrderSummary !== 'string') c.lastOrderSummary = '';
-  if (typeof c.lastOrderSnapshot === 'undefined') c.lastOrderSnapshot = null;
-  if (!Array.isArray(c.recentContext)) c.recentContext = [];
-  if (typeof c.recentContextSummary !== 'string') c.recentContextSummary = '';
-  c.updatedAt = nowISO();
-  return c;
-}
-
-function getConversation(phone, tenantId = 'default') {
-  const key = `${tenantId}:${phone}`;
-  const buildConversation = () => ({
-    id: key,
-    tenantId,
-    phone,
-    state: STATES.INIT,
-    stateUpdatedAt: nowISO(),
-    createdAt: nowISO(),
-    lastActivityAt: nowISO(),
-    contextSummary: '',
-    messageCount: 0,
-    consecutiveFailures: 0,
-    handoffNotified: false,
-    transaction: {
-      mode: '',
-      customer_name: '',
-      items: [],
-      notes: '',
-      address: { street_name: '', street_number: '', neighborhood: '', city: '', state: '', postal_code: '' },
-      payment: '',
-      total_amount: 0,
-      order_id: null,
-    },
-    confirmed: {},
-    pendingFieldConfirmation: null,
-    itemsPhaseComplete: false,
-    awaitingRepeatChoice: false,
-    lastRepeatOfferDate: '',
-    repeatPreview: '',
-    orderStoredForCustomer: false,
-    greeted: false,
-    greetedDate: '',
-    messages: [],
-    catalog: null,
-  });
-
-  let conv = conversations.get(key);
-  const now = Date.now();
-  const inactivityMs = conv ? (now - new Date(conv.lastActivityAt || conv.createdAt || nowISO()).getTime()) : 0;
-  const shouldResetByState = conv
-    && (
-      (conv.state === STATES.WAITING_PAYMENT && inactivityMs > WAITING_PAYMENT_TTL)
-      || (conv.state !== STATES.INIT && inactivityMs > ACTIVE_FLOW_TTL)
-    );
-  if (!conv || inactivityMs > SESSION_TTL || shouldResetByState) {
-    conv = buildConversation();
-    conversations.set(key, conv);
-  }
-  if (!conv.confirmed || typeof conv.confirmed !== 'object') conv.confirmed = {};
-  if (!conv.stateUpdatedAt) conv.stateUpdatedAt = nowISO();
-  if (typeof conv.pendingFieldConfirmation === 'undefined') conv.pendingFieldConfirmation = null;
-  if (typeof conv.itemsPhaseComplete !== 'boolean') conv.itemsPhaseComplete = false;
-  if (typeof conv.awaitingRepeatChoice !== 'boolean') conv.awaitingRepeatChoice = false;
-  if (typeof conv.lastRepeatOfferDate !== 'string') conv.lastRepeatOfferDate = '';
-  if (typeof conv.repeatPreview !== 'string') conv.repeatPreview = '';
-  if (typeof conv.orderStoredForCustomer !== 'boolean') conv.orderStoredForCustomer = false;
-  if (typeof conv.greetedDate !== 'string') conv.greetedDate = '';
-  if (
-    !conv.itemsPhaseComplete
-    && Array.isArray(conv.transaction?.items) && conv.transaction.items.length > 0
-    && (
-      Boolean(cleanText(conv.transaction?.mode))
-      || Boolean(cleanText(conv.transaction?.payment))
-      || [STATES.WAITING_CONFIRMATION, STATES.WAITING_PAYMENT, STATES.CONFIRMED].includes(conv.state)
-    )
-  ) {
-    conv.itemsPhaseComplete = true;
-  }
-  conv.lastActivityAt = nowISO();
-  return conv;
-}
-
-function appendMessage(conv, role, content, metadata = {}) {
-  conv.messages.push({ role, content, metadata, at: nowISO() });
-  if (conv.messages.length > 30) conv.messages = conv.messages.slice(-30);
-  conv.messageCount = (conv.messageCount || 0) + 1;
-  conv.lastActivityAt = nowISO();
-}
-
-function appendCustomerMemory(customer, role, content, metadata = {}, state = '') {
-  if (!customer) return;
-  const text = cleanText(content);
-  if (!text) return;
-  if (!Array.isArray(customer.recentContext)) customer.recentContext = [];
-  customer.recentContext.push({
-    role: role === 'assistant' ? 'assistant' : 'user',
-    content: text.slice(0, 400),
-    action: cleanText(metadata?.action || ''),
-    state: cleanText(state || ''),
-    at: nowISO(),
-  });
-  if (customer.recentContext.length > MAX_CUSTOMER_RECENT_MEMORY) {
-    customer.recentContext = customer.recentContext.slice(-MAX_CUSTOMER_RECENT_MEMORY);
-  }
-}
-
-function isNonInformativeFieldValue(value) {
-  const x = normalizeForMatch(value);
-  if (!x) return true;
-  return /\b(ja falei|jah falei|ja informei|ja passei|como ja falei|eu ja falei|mesmo de antes|o mesmo|isso ai|isso ae|isso mesmo)\b/.test(x);
-}
 
 function replyContainsGreeting(text) {
   const raw = cleanText(text);
@@ -891,61 +370,67 @@ function inferItemsFromMenu(message, menuRows) {
 function extractItemsFromFreeText(text) {
   const raw = cleanText(text);
   if (!raw) return [];
-  const qtyWords = { um: 1, uma: 1, dois: 2, duas: 2, tres: 3, quatro: 4, cinco: 5 };
+
+  // Palavras-chave de quantidade
+  const qtyWords = { um: 1, uma: 1, dois: 2, duas: 2, tres: 3, três: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10 };
+
+  // Regex para quebrar a string em itens. Considera "e", "mais", "com", vírgulas e "quero" repetido.
+  // Ex: "quero uma pizza e também quero um refri" -> ["uma pizza", "um refri"]
   const chunks = raw
-    .split(/\s*(?:,|;|\s+e\s+)\s*/i)
-    .map((s) => cleanText(s))
+    .replace(/^(quero|gostaria de|me vê|me manda)\s+/i, '') // Remove comando inicial
+    .split(/\s+(?:e|t(a|e)mb[eé]m|com|mais|depois|agora)\s+|\s*,\s*|\s+(?=quero|gostaria|adiciona)/i)
+    .map(s => cleanText(s))
     .filter(Boolean);
+
   const items = [];
 
   for (let chunk of chunks) {
+    // Ignora frases que claramente não são itens
     if (/^(oi|ola|olá|bom dia|boa tarde|boa noite)$/i.test(chunk)) continue;
-    if (/^(so isso|só isso|somente isso|apenas isso|isso|isso mesmo|e isso|nada mais|pedido completo|fechar pedido|pode fechar)$/i.test(chunk)) continue;
-    if (/\b(rua|av(?:enida)?|bairro|cep|numero|n[úu]mero|pix|cart[aã]o|retirada|delivery|dinheiro|especie|espécie|cash)\b/i.test(chunk)) continue;
-    if (/\b(horario|horário|funcionamento|endereco|endereço|taxa|taxas|cardapio|cardápio|preço|preco|quanto custa|quanto fica|como funciona|qual é|qual e|quais s[aã]o|informacao|informação)\b/i.test(chunk)) continue;
-    if (chunk.trim().endsWith('?')) continue; // perguntas não são itens
+    if (/^(s[oó] isso|nada mais|fecha(r)? (a conta|o pedido))$/i.test(chunk)) continue;
+    if (/\b(rua|bairro|endere[cç]o|pagamento|pix|cart[aã]o|dinheiro)\b/i.test(chunk)) continue;
+    if (/\?$/.test(chunk)) continue; // Ignora perguntas
 
     let quantity = 1;
-    const qtyPrefix = chunk.match(/^\s*(\d+|um|uma|dois|duas|tres|quatro|cinco)\b/i);
-    if (qtyPrefix) {
-      const q = qtyPrefix[1].toLowerCase();
-      quantity = Number(q) || qtyWords[q] || 1;
-      chunk = cleanText(chunk.slice(qtyPrefix[0].length));
-    } else {
-      const qtyAnywhere = chunk.match(/\b(\d+|um|uma|dois|duas|tres|quatro|cinco)\b/i);
-      if (qtyAnywhere) {
-        const q = qtyAnywhere[1].toLowerCase();
-        quantity = Number(q) || qtyWords[q] || 1;
-        chunk = cleanText(chunk.replace(qtyAnywhere[0], ' '));
-      }
-      const qtyInline = chunk.match(/\b(\d+)\s*x\b/i);
-      if (qtyInline) {
-        quantity = Math.max(1, Number(qtyInline[1]) || 1);
-        chunk = cleanText(chunk.replace(/\b\d+\s*x\b/i, ' '));
-      }
+    let name = chunk;
+
+    // Regex unificado para extrair quantidade (número ou palavra) do início ou de qualquer lugar
+    const qtyMatch = name.match(/^(?:(\d+|uma?|dois|duas|tr[eê]s|quatro|cinco|seis|sete|oito|nove|dez)\s+)/i)
+      || name.match(/\b(\d+|uma?|dois|duas|tr[eê]s|quatro|cinco|seis|sete|oito|nove|dez)\b/i)
+      || name.match(/\b(\d+)\s*x\b/i);
+
+    if (qtyMatch) {
+      const qtyToken = qtyMatch[1].toLowerCase();
+      quantity = Number(qtyToken) || qtyWords[qtyToken] || 1;
+      // Remove a quantidade e a palavra "x" (se houver) para limpar o nome
+      name = cleanText(name.replace(qtyMatch[0], ''));
     }
 
+    // Limpeza final do nome do item, sendo menos agressivo
     const cleanedName = cleanText(
-      chunk
-        .replace(/^(quero|gostaria(?:\s+de)?|pedido|me\s+ve|me\s+v[eê]|me\s+manda|faltou|inclui|inclua|adiciona|adicione|acrescenta|acrescente)\s+/i, '')
-        .replace(/\b(faltou|inclui|inclua|adiciona|adicione|acrescenta|acrescente|mais|tambem|também|so|só)\b/gi, ' ')
-        .replace(/\b(os|as|o|a|uns|umas|de|do|da|dos|das)\b/gi, ' ')
-        .replace(/\b(para|pra)\s+(entrega|delivery|retirada|retirar)\b/gi, '')
-        .replace(/\b(no|na)\s+(pix|dinheiro|cart[aã]o|cartao|credito|d[eé]bito|debito)\b/gi, '')
+      name
+        .replace(/^(de|do|da)\s+/i, '') // Remove artigos no início que sobraram da limpeza
+        .replace(/\b(unidade|unidades|un|und)\b/gi, ' ')
         .replace(/\s+/g, ' ')
     );
 
     if (!cleanedName || cleanedName.length < 2) continue;
+
     items.push({ name: cleanedName, quantity: Math.max(1, quantity) });
   }
 
-  // Deduplica itens com mesmo nome — mantém a ÚLTIMA quantidade mencionada (set, não soma)
+  // Mescla itens com o mesmo nome, somando as quantidades
   const merged = new Map();
   for (const item of items) {
-    const key = normalizeForMatch(item.name);
-    // Sempre sobrescreve: a última menção é a fonte de verdade
-    merged.set(key, { name: cleanText(item.name), quantity: toNumberOrOne(item.quantity) });
+    const key = singularizeToken(normalizeForMatch(item.name));
+    if (merged.has(key)) {
+      const existing = merged.get(key);
+      existing.quantity += item.quantity;
+    } else {
+      merged.set(key, { name: cleanText(item.name), quantity: toNumberOrOne(item.quantity) });
+    }
   }
+
   return Array.from(merged.values());
 }
 
@@ -1122,7 +607,7 @@ async function classifierAgent({ runtime, conversation, groupedText }) {
     return { intent: 'REMOVER_ITEM', requires_extraction: false, handoff: false, confidence: 0.95, _isRemove: true };
   }
 
-  const isSpecification = /\b([eé]|era)\s+(lata|latinha|\d+\s*l)|\blata\s+n[aã]o\b|\b([eé]|era)\s+\d+\s*l\b/i.test(lower);
+  const isSpecification = /\b([eé]|era|troca|substitui|mud[ae]|altera)\s+(lata|latinha|\d+\s*l)|\blata\s+n[aã]o\b|\b([eé]|era|troca|substitui|mud[ae]|altera)\s+\d+\s*l\b/i.test(lower);
   if (isSpecification && hasCartItems) {
     return { intent: 'SUBSTITUIR_ITEM', requires_extraction: false, handoff: false, confidence: 0.9, _isReplace: true };
   }
@@ -1582,7 +1067,7 @@ function applySnapshotToConversation(conversation, snapshot) {
  * orchestrateV2 — usa state-machine.transition() como motor central.
  * Preserva toda lógica de negócio (repeat order, upsell, confirmation, correction).
  */
-function orchestrateV2({ runtime, conversation, customer, classification, extracted, groupedText }) {
+function orchestrate({ runtime, conversation, customer, classification, extracted, groupedText }) {
   // ── Merge (igual ao V1) ──
   if (runtime.segment === 'restaurant') {
     const extractedHasItems = Array.isArray(extracted?.items) && extracted.items.length > 0;
@@ -1658,7 +1143,14 @@ function orchestrateV2({ runtime, conversation, customer, classification, extrac
 
   // ── Mapear intent do classificador para action do state-machine ──
   const schemaIntent = conversation._lastSchemaIntent;
-  const smAction = schemaIntent?.action || _mapIntentToAction(i, { yes, no, groupedText, state: s });
+  let smAction = _mapIntentToAction(i, { yes, no, groupedText, state: s });
+  console.log(`[ANA-DEBUG] ORCHESTRATE CHECK: state=${s}, intent=${i}, yes=${yes}, no=${no}, smAction=${smAction}`);
+
+  // Se o mapping determinístico resultou em confirmação/cancelamento, priorizar sobre o schema.
+  // Caso contrário, se o schema tem uma action sugerida, usá-la.
+  if (smAction !== 'confirm_order' && smAction !== 'cancel_order' && schemaIntent?.action) {
+    smAction = schemaIntent.action;
+  }
 
   // ── FINALIZANDO: correction flow (preservado) ──
   if (s === STATES.FINALIZANDO) {
@@ -1726,6 +1218,7 @@ function orchestrateV2({ runtime, conversation, customer, classification, extrac
     requireAddress: runtime.delivery?.requireAddress !== false,
     itemsPhaseComplete: conversation.itemsPhaseComplete,
   });
+  console.log(`[ANA-DEBUG] SM_RESULT: ${JSON.stringify(smResult)}`);
 
   // ── Field confirmation flow (preservado) ──
   if ([STATES.ADICIONANDO_ITEM, STATES.MENU, STATES.CONFIRMANDO_CARRINHO, STATES.COLETANDO_ENDERECO, STATES.COLETANDO_PAGAMENTO].includes(s)) {
@@ -1833,362 +1326,23 @@ function orchestrateV2({ runtime, conversation, customer, classification, extrac
  * Mapeia intent do classificador para action do state-machine.
  */
 function _mapIntentToAction(intent, ctx) {
+  if (ctx.yes && ctx.state === STATES.FINALIZANDO) return 'confirm_order';
+  if (ctx.no && ctx.state === STATES.FINALIZANDO) return 'cancel_order';
+
   const map = {
     [INTENTS.NOVO_PEDIDO]: 'add_item',
     [INTENTS.SAUDACAO]: 'greeting',
     [INTENTS.CONSULTA]: 'ask_question',
     [INTENTS.CANCELAMENTO]: 'cancel_order',
     [INTENTS.PAGAMENTO]: 'set_payment',
+    [INTENTS.GERENCIAMENTO]: 'add_item',
     [INTENTS.HUMANO]: 'unknown',
     [INTENTS.SPAM]: 'unknown',
   };
-  if (ctx.yes && ctx.state === STATES.FINALIZANDO) return 'confirm_order';
-  if (ctx.no && ctx.state === STATES.FINALIZANDO) return 'cancel_order';
   return map[intent] || 'unknown';
 }
 
-function orchestrate({ runtime, conversation, customer, classification, extracted, groupedText }) {
-  if (runtime.segment === 'restaurant') {
-    // Só limpa items do merge quando o extractor NÃO encontrou nenhum item na mensagem.
-    const extractedHasItems = Array.isArray(extracted?.items) && extracted.items.length > 0;
-    const mergeExtracted = (classification.intent === INTENTS.CONSULTA && !extractedHasItems)
-      ? { ...extracted, items: [] }
-      : (extracted || {});
-    mergeRestaurantTransaction(conversation, mergeExtracted);
-  }
-  if (runtime.segment === 'restaurant') enrichAddressWithCompanyDefaults(conversation);
-  if (runtime.segment === 'restaurant') conversation.pendingFieldConfirmation = null;
 
-  // Recalcular total do carrinho após cada merge
-  if (runtime.segment === 'restaurant' && Array.isArray(conversation.transaction?.items)) {
-    const amounts = calculateOrderAmounts(conversation.transaction, conversation);
-    conversation.transaction.total_amount = amounts.total;
-  }
-
-  const handoff = classification.handoff
-    || classification.intent === INTENTS.HUMANO
-    || Number(classification.confidence || 0) < 0.45
-    || /(raiva|horrivel|horrible|péssimo|pessimo|absurdo|ridículo|ridiculo|lamentável|lamentavel|inacreditável|inacreditavel|vergonha|uma merda|tô bravo|to bravo|tô com raiva|to com raiva|que saco|tô puto|to puto|não acredito|nao acredito|péssimo atendimento|pessimo atendimento)/i.test(groupedText)
-    || (conversation.consecutiveFailures || 0) >= 3;
-
-  if (handoff) return { nextState: STATES.HUMAN_HANDOFF, action: 'HUMAN_HANDOFF', missing: [] };
-
-  // Normalizar estado legado para novo mapa
-  let s = conversation.state;
-  if (s === 'COLLECTING_DATA') s = STATES.ADICIONANDO_ITEM;
-  if (s === 'WAITING_CONFIRMATION') s = STATES.FINALIZANDO;
-  conversation.state = s;
-
-  const i = classification.intent;
-  const yes = detectYes(groupedText);
-  const no = detectNo(groupedText);
-  const menuQuery = isMenuQueryText(groupedText);
-  const hasQuestion = /\?/.test(groupedText) || /\b(qual|quando|como|onde|que horas|card[aá]pio|pre[cç]o)\b/i.test(groupedText);
-
-  if (runtime.segment === 'clinic') {
-    if (s === STATES.INIT && i === INTENTS.NOVO_PEDIDO) return { nextState: STATES.ADICIONANDO_ITEM, action: 'CLINIC_COLLECT', missing: ['service', 'date', 'time'] };
-    if (s === STATES.FINALIZANDO && yes) return { nextState: STATES.CONFIRMED, action: 'CLINIC_CONFIRMED', missing: [] };
-    if (s === STATES.FINALIZANDO && no) return { nextState: STATES.ADICIONANDO_ITEM, action: 'REQUEST_ADJUSTMENTS', missing: [] };
-    return { nextState: s, action: s === STATES.INIT ? 'WELCOME' : 'ASK_MISSING_FIELDS', missing: ['service', 'date', 'time'] };
-  }
-
-  // ── INIT ──────────────────────────────────────────────────────────────
-  if (runtime.segment === 'restaurant' && menuQuery) {
-    const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
-      itemsPhaseComplete: conversation.itemsPhaseComplete,
-    });
-    return { nextState: s === STATES.INIT ? STATES.ADICIONANDO_ITEM : s, action: 'SHOW_MENU', missing };
-  }
-
-  if (s === STATES.INIT) {
-    const today = nowISO().slice(0, 10);
-    const hasPreviousOrder = Boolean(customer?.lastOrderSnapshot && Array.isArray(customer.lastOrderSnapshot.items) && customer.lastOrderSnapshot.items.length);
-
-    if (conversation.awaitingRepeatChoice && hasPreviousOrder) {
-      if (yes) {
-        applySnapshotToConversation(conversation, customer.lastOrderSnapshot);
-        conversation.awaitingRepeatChoice = false;
-        return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
-      }
-      if (no) {
-        conversation.awaitingRepeatChoice = false;
-        conversation.repeatPreview = '';
-      } else {
-        return {
-          nextState: STATES.INIT,
-          action: hasQuestion ? 'ANSWER_AND_RESUME_REPEAT' : 'ASK_REPEAT_LAST_ORDER',
-          missing: [],
-        };
-      }
-    }
-
-    if (hasPreviousOrder && conversation.lastRepeatOfferDate !== today) {
-      conversation.lastRepeatOfferDate = today;
-      conversation.awaitingRepeatChoice = true;
-      conversation.repeatPreview = customer.lastOrderSummary || formatOrderPreview(customer.lastOrderSnapshot);
-      return { nextState: STATES.INIT, action: 'ASK_REPEAT_LAST_ORDER', missing: [] };
-    }
-
-    if (i === INTENTS.SAUDACAO) {
-      if (runtime.greetingOncePerDay && conversation.lastGreetingDate === today) {
-        if (conversation.pendingFieldConfirmation) {
-          return {
-            nextState: STATES.ADICIONANDO_ITEM,
-            action: hasQuestion ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION',
-            missing: [conversation.pendingFieldConfirmation],
-          };
-        }
-        const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
-          itemsPhaseComplete: conversation.itemsPhaseComplete,
-        });
-        return { nextState: STATES.ADICIONANDO_ITEM, action: 'ASK_MISSING_FIELDS', missing };
-      }
-      conversation.lastGreetingDate = today;
-      const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
-        itemsPhaseComplete: conversation.itemsPhaseComplete,
-      });
-      return { nextState: STATES.ADICIONANDO_ITEM, action: 'WELCOME', missing };
-    }
-    if (i === INTENTS.NOVO_PEDIDO) {
-      const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
-        itemsPhaseComplete: conversation.itemsPhaseComplete,
-      });
-      return missing.length ? { nextState: STATES.ADICIONANDO_ITEM, action: 'ASK_MISSING_FIELDS', missing } : { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
-    }
-    if (i === INTENTS.SPAM) return { nextState: STATES.CLOSED, action: 'END_CONVERSATION', missing: [] };
-    if (conversation.pendingFieldConfirmation) {
-      return {
-        nextState: STATES.ADICIONANDO_ITEM,
-        action: hasQuestion ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION',
-        missing: [conversation.pendingFieldConfirmation],
-      };
-    }
-    const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
-      itemsPhaseComplete: conversation.itemsPhaseComplete,
-    });
-    return { nextState: STATES.ADICIONANDO_ITEM, action: hasQuestion ? 'ANSWER_AND_RESUME' : 'ASK_MISSING_FIELDS', missing };
-  }
-
-  // ── ADICIONANDO_ITEM (ex-COLLECTING_DATA) ─────────────────────────────
-  if (s === STATES.ADICIONANDO_ITEM || s === STATES.MENU || s === STATES.CONFIRMANDO_CARRINHO || s === STATES.COLETANDO_ENDERECO || s === STATES.COLETANDO_PAGAMENTO) {
-    const explicitCancel = /\b(cancela|cancelar|deixa quieto|desisti|desisto|aborta|encerrar pedido)\b/i.test(groupedText);
-    if (explicitCancel) {
-      conversation.transaction = { mode: '', customer_name: '', items: [], notes: '', address: { street_name: '', street_number: '', neighborhood: '', city: '', state: '', postal_code: '' }, payment: '', total_amount: 0, order_id: null };
-      conversation.confirmed = {};
-      conversation.pendingFieldConfirmation = null;
-      conversation.upsellDone = false;
-      conversation.itemsPhaseComplete = false;
-      return { nextState: STATES.INIT, action: 'FLOW_CANCELLED', missing: [] };
-    }
-    if (i === INTENTS.CANCELAMENTO) {
-      conversation.transaction = { mode: '', customer_name: '', items: [], notes: '', address: { street_name: '', street_number: '', neighborhood: '', city: '', state: '', postal_code: '' }, payment: '', total_amount: 0, order_id: null };
-      conversation.confirmed = {};
-      conversation.pendingFieldConfirmation = null;
-      conversation.upsellDone = false;
-      conversation.itemsPhaseComplete = false;
-      return { nextState: STATES.INIT, action: 'FLOW_CANCELLED', missing: [] };
-    }
-    if (conversation.pendingFieldConfirmation) {
-      const field = conversation.pendingFieldConfirmation;
-      if (field === 'items' && Array.isArray(extracted?.items) && extracted.items.length) {
-        conversation.pendingFieldConfirmation = null;
-      }
-    }
-    if (conversation.pendingFieldConfirmation) {
-      const field = conversation.pendingFieldConfirmation;
-      if (yes) {
-        conversation.confirmed[field] = true;
-        conversation.pendingFieldConfirmation = null;
-      } else if (no) {
-        clearTransactionField(conversation.transaction, field);
-        conversation.confirmed[field] = false;
-        conversation.pendingFieldConfirmation = null;
-        return { nextState: STATES.ADICIONANDO_ITEM, action: 'ASK_MISSING_FIELDS', missing: [field] };
-      } else {
-        return { nextState: STATES.ADICIONANDO_ITEM, action: hasQuestion ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION', missing: [field] };
-      }
-    }
-
-    const hasItems = Array.isArray(conversation.transaction.items) && conversation.transaction.items.length > 0;
-    const hasNewItemsInMessage = Array.isArray(extracted?.items) && extracted.items.length > 0;
-    const finishedSelectingItems = detectItemsPhaseDone(groupedText);
-    if (hasNewItemsInMessage) conversation.itemsPhaseComplete = false;
-    if (hasItems && !conversation.itemsPhaseComplete && finishedSelectingItems && !hasNewItemsInMessage) {
-      conversation.itemsPhaseComplete = true;
-      conversation.upsellDone = true;
-    }
-    const missing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
-      itemsPhaseComplete: conversation.itemsPhaseComplete,
-    });
-
-    // UPSELL: After items are set, suggest extras before collecting logistics (once per order)
-    if (
-      hasItems &&
-      !conversation.itemsPhaseComplete &&  // still selecting items
-      !conversation.upsellDone &&          // haven't upsold yet
-      i !== INTENTS.CANCELAMENTO &&
-      !yes && !no && !hasQuestion &&       // not a confirmation response
-      !finishedSelectingItems             // not "somente isso"
-    ) {
-      conversation.upsellDone = true;
-      return { nextState: STATES.ADICIONANDO_ITEM, action: 'UPSELL_SUGGEST', missing };
-    }
-
-    // Upsell foi oferecido e cliente disse "não" → avançar (nunca insistir)
-    if (hasItems && !conversation.itemsPhaseComplete && conversation.upsellDone && (no || finishedSelectingItems) && !hasNewItemsInMessage) {
-      conversation.itemsPhaseComplete = true;
-      const updatedMissing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, { itemsPhaseComplete: true });
-      return { nextState: STATES.ADICIONANDO_ITEM, action: 'ASK_MISSING_FIELDS', missing: updatedMissing };
-    }
-    if (yes && hasItems && conversation.itemsPhaseComplete && !conversation.pendingFieldConfirmation) {
-      const updatedMissing = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
-        itemsPhaseComplete: true,
-      });
-      if (!updatedMissing.length) return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
-      const firstMissing = updatedMissing[0];
-      let subState = STATES.ADICIONANDO_ITEM;
-      if (firstMissing === 'mode') subState = STATES.CONFIRMANDO_CARRINHO;
-      else if (firstMissing.startsWith('address.')) subState = STATES.COLETANDO_ENDERECO;
-      else if (firstMissing === 'payment' || firstMissing === 'change_for') subState = STATES.COLETANDO_PAGAMENTO;
-      return { nextState: subState, action: 'ASK_MISSING_FIELDS', missing: updatedMissing };
-    }
-
-    if (missing.length && !conversation.pendingFieldConfirmation) {
-      const firstMissing = missing[0];
-      const hasValueForField = firstMissing === 'items'
-        ? Array.isArray(conversation.transaction.items) && conversation.transaction.items.length > 0
-        : firstMissing.startsWith('address.')
-          ? Boolean(cleanText(conversation.transaction.address?.[firstMissing.slice('address.'.length)]))
-          : Boolean(cleanText(conversation.transaction[firstMissing]));
-      if (firstMissing !== 'items' && hasValueForField) conversation.pendingFieldConfirmation = firstMissing;
-    }
-    if (conversation.pendingFieldConfirmation === 'items') {
-      conversation.pendingFieldConfirmation = null;
-    }
-    if (conversation.pendingFieldConfirmation) {
-      // Determinar sub-estado correto baseado no campo pendente
-      let subState = STATES.ADICIONANDO_ITEM;
-      if (conversation.pendingFieldConfirmation.startsWith('address.')) subState = STATES.COLETANDO_ENDERECO;
-      else if (conversation.pendingFieldConfirmation === 'payment') subState = STATES.COLETANDO_PAGAMENTO;
-      else if (conversation.pendingFieldConfirmation === 'mode') subState = STATES.CONFIRMANDO_CARRINHO;
-      return {
-        nextState: subState,
-        action: (i === INTENTS.CONSULTA || hasQuestion) ? 'ANSWER_AND_RESUME_CONFIRM' : 'ASK_FIELD_CONFIRMATION',
-        missing: [conversation.pendingFieldConfirmation],
-      };
-    }
-
-    // Determinar sub-estado correto baseado no próximo campo faltante
-    if (missing.length) {
-      let subState = STATES.ADICIONANDO_ITEM;
-      const firstMissing = missing[0];
-      if (firstMissing === 'items') subState = STATES.ADICIONANDO_ITEM;
-      else if (firstMissing === 'mode') subState = STATES.CONFIRMANDO_CARRINHO;
-      else if (firstMissing.startsWith('address.')) subState = STATES.COLETANDO_ENDERECO;
-      else if (firstMissing === 'payment') subState = STATES.COLETANDO_PAGAMENTO;
-      return { nextState: subState, action: (i === INTENTS.CONSULTA || hasQuestion) ? 'ANSWER_AND_RESUME' : 'ASK_MISSING_FIELDS', missing };
-    }
-    return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
-  }
-
-  // ── FINALIZANDO (ex-WAITING_CONFIRMATION) ──────────────────────────────
-  if (s === STATES.FINALIZANDO) {
-    const reviewAlreadyShown = hasRecentOrderReviewShown(conversation, 4);
-    if (!reviewAlreadyShown) {
-      return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
-    }
-
-    if (i === INTENTS.CANCELAMENTO) return { nextState: STATES.ADICIONANDO_ITEM, action: 'REQUEST_ADJUSTMENTS', missing: [] };
-
-    const missingBeforeConfirm = restaurantMissingFields(runtime, conversation.transaction, conversation.confirmed, {
-      itemsPhaseComplete: conversation.itemsPhaseComplete,
-    });
-    if (yes && missingBeforeConfirm.length > 0) {
-      const firstMissing = missingBeforeConfirm[0];
-      let subState = STATES.ADICIONANDO_ITEM;
-      if (firstMissing === 'change_for' || firstMissing === 'payment') subState = STATES.COLETANDO_PAGAMENTO;
-      else if (firstMissing.startsWith('address.')) subState = STATES.COLETANDO_ENDERECO;
-      return { nextState: subState, action: 'ASK_MISSING_FIELDS', missing: missingBeforeConfirm };
-    }
-
-    if (yes) return conversation.transaction.payment === 'PIX'
-      ? { nextState: STATES.WAITING_PAYMENT, action: 'CREATE_ORDER_AND_WAIT_PAYMENT', missing: [] }
-      : { nextState: STATES.CONFIRMED, action: 'CREATE_ORDER_AND_CONFIRM', missing: [] };
-
-    // ── CORREÇÃO DETERMINÍSTICA: permanece em FINALIZANDO, aplica UPDATE_ITEM ──
-    if (i === 'CORRECAO' || /\b(faltou|corrige|corrigir|ajusta|ajustar|mudar|alterar|ta errado|tá errado|está errado|errado|errei|n[aã]o [eé] isso)\b/i.test(groupedText)) {
-      const correction = classification.correction || detectCorrectionStable(groupedText);
-      if (correction.type === 'QTY_UPDATE' && correction.newQty != null) {
-        // UPDATE_ITEM: aplicar correção de quantidade diretamente no carrinho
-        const corrText = normalizeForMatch(groupedText);
-        const items = conversation.transaction.items || [];
-        // Tentar identificar qual item está sendo corrigido pelo contexto da mensagem
-        let corrected = false;
-        for (const item of items) {
-          const itemNorm = normalizeForMatch(item.name);
-          if (corrText.includes(itemNorm) || itemNorm.includes(corrText.split(/\s+/).slice(-2).join(' '))) {
-            item.quantity = correction.newQty;
-            corrected = true;
-            break;
-          }
-        }
-        // Se não conseguiu mapear item específico, corrigir todos com qty > newQty
-        if (!corrected && items.length > 0) {
-          for (const item of items) {
-            if (item.quantity > correction.newQty) {
-              item.quantity = correction.newQty;
-              corrected = true;
-            }
-          }
-        }
-        // Recalcular total
-        const amounts = calculateOrderAmounts(conversation.transaction, conversation);
-        conversation.transaction.total_amount = amounts.total;
-        anaDebug('CORRECTION_APPLIED', { type: 'QTY_UPDATE', newQty: correction.newQty, corrected, cart: cartSnapshot(conversation.transaction) });
-        return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
-      }
-      // GENERIC_ERROR: pedir detalhes sem sair do FINALIZANDO
-      if (no) {
-        return { nextState: STATES.FINALIZANDO, action: 'CORRECTION_REBUILD', missing: [] };
-      }
-      return { nextState: STATES.FINALIZANDO, action: 'CORRECTION_REBUILD', missing: [] };
-    }
-
-    // "não" simples sem padrão de correção = pedir ajustes
-    if (no) return { nextState: STATES.FINALIZANDO, action: 'CORRECTION_REBUILD', missing: [] };
-
-    // Consultation question while waiting confirmation: answer then re-ask
-    if (i === INTENTS.CONSULTA || hasQuestion) return { nextState: STATES.FINALIZANDO, action: 'ANSWER_AND_CONFIRM', missing: [] };
-    const hasOrderChange = Boolean(
-      (Array.isArray(extracted?.items) && extracted.items.length > 0)
-      || (cleanText(extracted?.mode) && cleanText(extracted.mode) !== cleanText(conversation.transaction?.mode))
-      || (cleanText(extracted?.payment) && cleanText(extracted.payment) !== cleanText(conversation.transaction?.payment))
-      || (cleanText(extracted?.notes) && cleanText(extracted.notes) !== cleanText(conversation.transaction?.notes))
-    );
-    if (hasOrderChange) return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
-    return { nextState: STATES.FINALIZANDO, action: 'ASK_CONFIRMATION', missing: [] };
-  }
-
-  // ── WAITING_PAYMENT ───────────────────────────────────────────────────
-  if (s === STATES.WAITING_PAYMENT) {
-    if (i === INTENTS.PAGAMENTO || yes || /paguei|comprovante|pago/.test(groupedText.toLowerCase())) return { nextState: STATES.CONFIRMED, action: 'PAYMENT_CONFIRMED', missing: [] };
-    if (i === INTENTS.CANCELAMENTO) return { nextState: STATES.ADICIONANDO_ITEM, action: 'REQUEST_ADJUSTMENTS', missing: [] };
-    if (/retirad|no local|na hora|dinheiro|cart[aã]o|cartao|cr[eé]dito|d[eé]bito/.test(groupedText.toLowerCase())) {
-      if (/dinheiro|na hora/.test(groupedText.toLowerCase())) conversation.transaction.payment = 'CASH';
-      else if (/cart[aã]o|cartao|cr[eé]dito|d[eé]bito/.test(groupedText.toLowerCase())) conversation.transaction.payment = 'CARD';
-      return { nextState: STATES.FINALIZANDO, action: 'ORDER_REVIEW', missing: [] };
-    }
-    return { nextState: STATES.WAITING_PAYMENT, action: 'PAYMENT_REMINDER', missing: [] };
-  }
-
-  // ── CONFIRMED ─────────────────────────────────────────────────────────
-  if (s === STATES.CONFIRMED) {
-    if (i === INTENTS.NOVO_PEDIDO) return { nextState: STATES.CONFIRMED, action: 'BLOCK_NEW_ORDER_UNTIL_FINISH', missing: [] };
-    return { nextState: STATES.CONFIRMED, action: 'POST_CONFIRMATION_SUPPORT', missing: [] };
-  }
-
-  return { nextState: s, action: 'CLARIFY', missing: [] };
-}
 
 function clearFollowUpTimers(key) {
   const existing = followUpTimers.get(key);
@@ -2224,7 +1378,7 @@ function scheduleFollowUp(conv, evolutionConfig) {
       appendCustomerMemory(getCustomer(current.tenantId || 'default', current.phone), 'assistant', msg, { action: 'FOLLOWUP_WARNING' }, current.state);
       persistStateDebounced();
     } catch (_) { }
-  }, 5 * 60 * 1000);
+  }, 5 * ONE_MINUTE_MS);
 
   const cancelTimer = setTimeout(async () => {
     try {
@@ -2253,7 +1407,7 @@ function scheduleFollowUp(conv, evolutionConfig) {
       followUpTimers.delete(key);
       persistStateDebounced();
     } catch (_) { }
-  }, 30 * 60 * 1000);
+  }, 30 * ONE_MINUTE_MS);
 
   followUpTimers.set(key, { warningTimer, cancelTimer });
 }
@@ -2268,6 +1422,7 @@ async function maybeLoadCatalog(conversation, runtime, apiRequest, getEnvConfig,
     phone: conversation.phone,
     source: conversation?.companyData?.meta?.menuSource || 'supabase',
   });
+  console.log('[CATÁLOGO DE TESTE]:', conversation.catalog.map(i => i.name).join(', '));
   return conversation.catalog;
 }
 
@@ -2275,10 +1430,13 @@ function hasRecentOrderReviewShown(conversation, lookback = 6) {
   const recent = Array.isArray(conversation?.messages)
     ? conversation.messages.slice(-Math.max(1, Number(lookback) || 1))
     : [];
+  console.log(`[ANA-DEBUG] CHECK_REVIEW: checking ${recent.length} recent messages`);
   return recent.some((m) => {
     if (m?.role !== 'assistant') return false;
     const text = normalizeForMatch(m?.content || '');
-    return text.includes('subtotal');
+    const found = text.includes('subtotal');
+    if (found) console.log(`[ANA-DEBUG] CHECK_REVIEW: found 'subtotal' in message: ${text.slice(0, 30)}...`);
+    return found;
   });
 }
 
@@ -2476,59 +1634,7 @@ function applyItemReplacement(conversation, text, extractedItems = []) {
   return true;
 }
 
-function resolveItemsWithCatalog(items, catalog) {
-  const normalizedCatalog = (catalog || []).map((item) => ({
-    raw: item,
-    normalized: normalizeForMatch(item?.name || ''),
-    tokens: tokenizeNormalized(item?.name || ''),
-    canonical: canonicalTokens(item?.name || ''),
-  })).filter((i) => i.normalized);
 
-  const findBestCatalogMatch = (rawName) => {
-    const target = normalizeForMatch(rawName);
-    if (!target) return null;
-    const targetTokens = tokenizeNormalized(target);
-    const targetSet = new Set(targetTokens);
-    const targetCanonical = canonicalTokens(target);
-    const targetCanonicalSet = new Set(targetCanonical);
-    let best = null;
-    let bestScore = 0;
-
-    for (const item of normalizedCatalog) {
-      let score = 0;
-      if (item.normalized === target) {
-        score = 1000;
-      } else if (item.normalized.includes(target) || target.includes(item.normalized)) {
-        score = 800 + Math.min(item.normalized.length, target.length);
-      } else {
-        const overlap = item.tokens.filter((t) => targetSet.has(t)).length;
-        const ratio = overlap / Math.max(item.tokens.length, targetTokens.length, 1);
-        const canonicalOverlap = item.canonical.filter((t) => targetCanonicalSet.has(t)).length;
-        const canonicalRatio = canonicalOverlap / Math.max(item.canonical.length, targetCanonical.length, 1);
-        const fuzzyOverlap = item.tokens.filter((t) => targetTokens.some((tt) => isNearToken(t, tt))).length;
-        const fuzzyRatio = fuzzyOverlap / Math.max(item.tokens.length, targetTokens.length, 1);
-        const bestRatio = Math.max(ratio, canonicalRatio, fuzzyRatio);
-        if (bestRatio >= 0.6) score = 500 + Math.round(bestRatio * 130);
-      }
-      if (score > bestScore) {
-        bestScore = score;
-        best = item.raw;
-      }
-    }
-
-    return bestScore >= 560 ? best : null;
-  };
-
-  const unresolved = [];
-  const resolved = [];
-  for (const item of (items || [])) {
-    const rawName = cleanText(item.name || item.nome || '');
-    const match = findBestCatalogMatch(rawName);
-    if (!match) { unresolved.push(item.name); continue; }
-    resolved.push({ integration_code: String(match.integration_code), desc_item: match.name, quantity: toNumberOrOne(item.quantity), unit_price: Number(match.unit_price || 0) });
-  }
-  return { resolved, unresolved };
-}
 
 function normalizeExtractedItemsWithCatalog(items, catalog) {
   const { resolved } = resolveItemsWithCatalog(items || [], catalog || []);
@@ -2714,19 +1820,11 @@ function generateOrderSummary(tx, conversation = null, { withConfirmation = true
   return lines.join('\n');
 }
 
-async function createSaiposOrder({ conversation, runtime, apiRequest, getEnvConfig, log }) {
+async function createSaiposOrder({ conversation, customer, runtime, apiRequest, getEnvConfig, log }) {
   if (runtime.segment !== 'restaurant') return { ok: true, skipped: true };
-  const tx = conversation.transaction || {};
 
-  const { resolved, unresolved } = resolveItemsWithCatalog(conversation.transaction.items, conversation.catalog || []);
-  if (unresolved.length) return { ok: false, unresolved };
-
-  const feeInfo = (conversation.transaction.mode || 'DELIVERY') === 'DELIVERY'
-    ? resolveDeliveryFee(conversation, conversation.transaction)
-    : null;
-  const deliveryFeeCents = feeInfo ? Math.round(Number(feeInfo.fee || 0) * 100) : 0;
-  const total_amount = resolved.reduce((sum, i) => sum + (i.unit_price * i.quantity), 0) + deliveryFeeCents;
-  conversation.transaction.total_amount = total_amount;
+  const { ok, payload, unresolved } = createOrderPayload({ conversation, customer, runtime });
+  if (!ok) return { ok: false, unresolved };
 
   const order_id = `${runtime.id}-ANA-${Date.now()}`;
   const display_id = String(Date.now()).slice(-4);
@@ -2738,30 +1836,30 @@ async function createSaiposOrder({ conversation, runtime, apiRequest, getEnvConf
     display_id,
     cod_store: cfg.codStore,
     created_at: nowISO(),
-    notes: cleanText(tx.notes || `Pedido WhatsApp - ${runtime.id}`),
-    total_amount,
+    notes: payload.observations,
+    total_amount: payload.total * 100,
     total_discount: 0,
     order_method: {
       mode: conversation.transaction.mode || 'DELIVERY',
       scheduled: false,
       delivery_date_time: nowISO(),
-      ...((conversation.transaction.mode || 'DELIVERY') === 'DELIVERY' ? { delivery_by: 'RESTAURANT', delivery_fee: deliveryFeeCents } : {}),
+      ...((conversation.transaction.mode || 'DELIVERY') === 'DELIVERY' ? { delivery_by: 'RESTAURANT', delivery_fee: payload.delivery_fee * 100 } : {}),
     },
-    customer: { id: conversation.phone, name: cleanText(tx.customer_name || 'Cliente WhatsApp'), phone: conversation.phone },
+    customer: { id: payload.customer_phone, name: payload.customer_name, phone: payload.customer_phone },
     ...(((conversation.transaction.mode || 'DELIVERY') === 'DELIVERY') ? {
       delivery_address: {
-        street_name: conversation.transaction.address.street_name || '',
-        street_number: conversation.transaction.address.street_number || 'S/N',
-        neighborhood: conversation.transaction.address.neighborhood || '',
-        district: conversation.transaction.address.neighborhood || '',
-        city: conversation.transaction.address.city || '',
-        state: conversation.transaction.address.state || '',
+        street_name: payload.address,
+        street_number: payload.address_number || 'S/N',
+        neighborhood: payload.neighborhood,
+        district: payload.neighborhood,
+        city: payload.city,
+        state: payload.state,
         country: 'BR',
-        postal_code: (conversation.transaction.address.postal_code || '').replace(/\D/g, ''),
+        postal_code: payload.zip_code,
       },
     } : {}),
-    items: resolved,
-    payment_types: [{ code: paymentCode, amount: total_amount, change_for: 0 }],
+    items: payload.items.map(i => ({ ...i, desc_item: i.name, unit_price: i.price * 100 })),
+    payment_types: [{ code: paymentCode, amount: payload.total * 100, change_for: 0 }],
   };
 
   try {
@@ -2775,58 +1873,21 @@ async function createSaiposOrder({ conversation, runtime, apiRequest, getEnvConf
   }
 }
 
-function toAnaFoodType(mode) {
-  return (mode || 'DELIVERY').toUpperCase() === 'TAKEOUT' ? 'pickup' : 'delivery';
-}
 
-function toAnaFoodPayment(payment) {
-  const p = String(payment || '').toLowerCase();
-  if (p === 'pix') return 'pix';
-  if (p === 'card') return 'cartao';
-  return p || 'dinheiro';
-}
 
-async function createAnaFoodOrder({ conversation, runtime, log }) {
+async function createAnaFoodOrder({ conversation, customer, runtime, log }) {
   if (runtime.segment !== 'restaurant') return { ok: true, skipped: true };
   if (!runtime.anafood.endpoint) return { ok: false, error: 'ANAFOOD endpoint nao configurado' };
 
-  const { resolved, unresolved } = resolveItemsWithCatalog(conversation.transaction.items, conversation.catalog || []);
-  if (unresolved.length) return { ok: false, unresolved };
+  const { ok, payload, unresolved } = createOrderPayload({ conversation, customer, runtime });
+  if (!ok) return { ok: false, unresolved };
 
-  const feeInfo = (conversation.transaction.mode || 'DELIVERY') === 'DELIVERY'
-    ? resolveDeliveryFee(conversation, conversation.transaction)
-    : null;
-  const deliveryFeeCents = feeInfo ? Math.round(Number(feeInfo.fee || 0) * 100) : 0;
-  const total_amount = resolved.reduce((sum, i) => sum + (i.unit_price * i.quantity), 0) + deliveryFeeCents;
-  conversation.transaction.total_amount = total_amount;
-
-  const items = resolved.map((i) => ({
-    name: i.desc_item,
-    quantity: i.quantity,
-    price: Number((i.unit_price || 0) / 100),
-  }));
-
-  const tx = conversation.transaction;
-  const payload = {
+  const anaFoodPayload = {
     action: 'create',
     ...(runtime.anafood.companyId ? { company_id: runtime.anafood.companyId } : {}),
     order: {
+      ...payload,
       ...(runtime.anafood.companyId ? { company_id: runtime.anafood.companyId } : {}),
-      customer_name: cleanText(tx.customer_name || 'Cliente WhatsApp'),
-      customer_phone: conversation.phone,
-      source: 'whatsapp',
-      type: toAnaFoodType(tx.mode),
-      payment_method: toAnaFoodPayment(tx.payment),
-      address: tx.address.street_name || '',
-      address_number: tx.address.street_number || '',
-      neighborhood: tx.address.neighborhood || '',
-      city: tx.address.city || '',
-      state: tx.address.state || '',
-      zip_code: (tx.address.postal_code || '').replace(/\D/g, ''),
-      items,
-      delivery_fee: Number((deliveryFeeCents || 0) / 100),
-      total: Number((total_amount || 0) / 100),
-      observations: cleanText(tx.notes || ''),
     },
   };
 
@@ -2842,12 +1903,12 @@ async function createAnaFoodOrder({ conversation, runtime, log }) {
   // ── [ANA-DEBUG] ORDER_PAYLOAD ──────────────────────────────────────────
   anaDebug('ORDER_PAYLOAD', {
     endpoint: runtime.anafood.endpoint,
-    items: payload.order.items,
-    total: payload.order.total,
-    delivery_fee: payload.order.delivery_fee,
-    customer: payload.order.customer_name,
-    payment: payload.order.payment_method,
-    type: payload.order.type,
+    items: anaFoodPayload.order.items,
+    total: anaFoodPayload.order.total,
+    delivery_fee: anaFoodPayload.order.delivery_fee,
+    customer: anaFoodPayload.order.customer_name,
+    payment: anaFoodPayload.order.payment_method,
+    type: anaFoodPayload.order.type,
   });
 
   try {
@@ -2855,7 +1916,7 @@ async function createAnaFoodOrder({ conversation, runtime, log }) {
     const response = await fetch(runtime.anafood.endpoint, {
       method: 'POST',
       headers,
-      body: JSON.stringify(payload),
+      body: JSON.stringify(anaFoodPayload),
     });
     const elapsed = Date.now() - startMs;
     const data = await response.json().catch(() => ({}));
@@ -2902,30 +1963,24 @@ async function createAnaFoodOrder({ conversation, runtime, log }) {
   }
 }
 
-async function createOrderByProviderIfNeeded({ conversation, runtime, apiRequest, getEnvConfig, log }) {
+async function createOrderByProviderIfNeeded({ conversation, customer, runtime, apiRequest, getEnvConfig, log }) {
   if (runtime.segment !== 'restaurant') return { ok: true, skipped: true };
   if (conversation.transaction.order_id) return { ok: true, already: true };
 
   if (runtime.orderProvider === 'anafood') {
-    return createAnaFoodOrder({ conversation, runtime, log });
+    return createAnaFoodOrder({ conversation, customer, runtime, log });
   }
 
-  const saipos = await createSaiposOrder({ conversation, runtime, apiRequest, getEnvConfig, log });
+  const saipos = await createSaiposOrder({ conversation, customer, runtime, apiRequest, getEnvConfig, log });
   if (saipos.ok) return saipos;
   if (runtime.anafood?.endpoint) {
     log('INFO', 'Ana: fallback para AnaFood apos falha no SAIPOS', { tenantId: runtime.id, phone: conversation.phone, err: saipos.error || '' });
-    return createAnaFoodOrder({ conversation, runtime, log });
+    return createAnaFoodOrder({ conversation, customer, runtime, log });
   }
   return saipos;
 }
 
-function toReaisAmount(v) {
-  const n = Number(v || 0);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  const raw = String(v || '');
-  if (!raw.includes('.') && !raw.includes(',') && n >= 100) return n / 100;
-  return n;
-}
+
 
 function isBeverageItemName(name = '') {
   const n = normalizeForMatch(name);
@@ -2953,48 +2008,7 @@ function categorizeItem(name = '') {
   return '🍽️';
 }
 
-function resolveDeliveryFee(conversation, tx) {
-  const deliveryAreas = Array.isArray(conversation?.companyData?.deliveryAreas) ? conversation.companyData.deliveryAreas : [];
-  if (!deliveryAreas.length) return null;
-  const neighborhood = normalizeForMatch(tx?.address?.neighborhood || '');
-  const street = normalizeForMatch(tx?.address?.street_name || '');
-  const targets = [neighborhood, street].filter(Boolean);
-  if (!targets.length) return null;
 
-  let best = null;
-  let bestScore = 0;
-  for (const area of deliveryAreas) {
-    const areaName = cleanText(area?.neighborhood || area?.bairro || area?.zone_name || area?.name || '');
-    const areaNorm = normalizeForMatch(areaName);
-    if (!areaNorm) continue;
-    let score = 0;
-    for (const t of targets) {
-      if (t === areaNorm) score = Math.max(score, 100);
-      else if (t.includes(areaNorm) || areaNorm.includes(t)) score = Math.max(score, 70);
-    }
-    if (score > bestScore) {
-      bestScore = score;
-      best = area;
-    }
-  }
-  if (!best) {
-    if (deliveryAreas.length === 1) best = deliveryAreas[0];
-  }
-  if (!best) {
-    const generic = deliveryAreas.find((a) => {
-      const n = normalizeForMatch(a?.neighborhood || a?.bairro || a?.zone_name || a?.name || '');
-      return /\b(geral|padrao|padrão|todos|todas|qualquer|toda cidade|cidade inteira|entrega)\b/.test(n);
-    });
-    if (generic) best = generic;
-  }
-  if (!best) return null;
-  const fee = toReaisAmount(best?.fee ?? best?.taxa ?? best?.delivery_fee ?? 0);
-  if (fee <= 0) return null;
-  return {
-    neighborhood: cleanText(best?.neighborhood || best?.bairro || best?.zone_name || best?.name || ''),
-    fee,
-  };
-}
 
 function resolveFlatDeliveryFee(conversation) {
   const raw = (
@@ -3108,6 +2122,16 @@ function fallbackText(runtime, action, tx, missing, conversation = null) {
     const first = (missing || [])[0];
     const payments = getAvailablePaymentMethods(runtime, conversation).join(', ');
     const hasItems = Array.isArray(tx?.items) && tx.items.length > 0;
+
+    // Lógica para respostas mais inteligentes e contextuais
+    const hasMode = cleanText(tx.mode);
+    const hasPayment = cleanText(tx.payment);
+
+    // Se já temos modo e pagamento, e falta o endereço, vamos direto ao ponto.
+    if (hasMode && hasPayment && first && first.startsWith('address.')) {
+      return `Ok, entendi. Para entrega com pagamento via ${tx.payment}, só preciso do seu endereço. Qual a rua?`;
+    }
+
     const map = {
       customer_name: 'Qual é o seu nome?',
       items: hasItems
@@ -4083,9 +3107,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
         itemsPhaseComplete: conversation.itemsPhaseComplete,
       }),
     }
-    : ((process.env.USE_STATE_MACHINE === 'true')
-      ? orchestrateV2({ runtime, conversation, customer, classification, extracted, groupedText: normalizedText })
-      : orchestrate({ runtime, conversation, customer, classification, extracted, groupedText: normalizedText }));
+    : orchestrate({ runtime, conversation, customer, classification, extracted, groupedText: normalizedText });
   conversation.state = orchestratorResult.nextState;
   if (conversation.state !== previousState) conversation.stateUpdatedAt = nowISO();
 
@@ -4201,7 +3223,7 @@ async function runPipeline({ conversation, customer, groupedText, normalized, ru
       payment: conversation.transaction.payment,
       itemsCount: Array.isArray(conversation.transaction.items) ? conversation.transaction.items.length : 0,
     });
-    const order = await createOrderByProviderIfNeeded({ conversation, runtime, apiRequest, getEnvConfig, log });
+    const order = await createOrderByProviderIfNeeded({ conversation, customer, runtime, apiRequest, getEnvConfig, log });
     if (!order.ok) {
       conversation.consecutiveFailures = (conversation.consecutiveFailures || 0) + 1;
       // Evita estado fantasma em WAITING_PAYMENT quando falha ao criar pedido
@@ -4556,6 +3578,101 @@ function clearCustomerAndSession(tenantId, phone) {
   customers.delete(key);
   persistStateDebounced();
   return { cleared: true, key };
+}
+
+function getAgentSettings(tenantId = 'default') {
+  const current = agentSettings.get(tenantId) || {};
+  return {
+    tenantId,
+    bufferWindowMs: Number(current.bufferWindowMs || AGENT_DEFAULTS.bufferWindowMs),
+    greetingMessage: String(current.greetingMessage || AGENT_DEFAULTS.greetingMessage),
+    greetingOncePerDay: true,
+  };
+}
+
+function setAgentSettings(tenantId = 'default', patch = {}) {
+  const current = getAgentSettings(tenantId);
+  const next = {
+    ...current,
+    bufferWindowMs: Math.max(1000, Math.min(120000, Number(patch.bufferWindowMs || current.bufferWindowMs || AGENT_DEFAULTS.bufferWindowMs))),
+    greetingMessage: cleanText(String(patch.greetingMessage || current.greetingMessage || AGENT_DEFAULTS.greetingMessage)),
+    greetingOncePerDay: true,
+  };
+  agentSettings.set(tenantId, next);
+  return next;
+}
+
+function getConversation(phone, tenantId = 'default') {
+  const key = `${tenantId}:${phone}`;
+  const buildConversation = () => ({
+    id: key,
+    tenantId,
+    phone,
+    state: STATES.INIT,
+    stateUpdatedAt: nowISO(),
+    createdAt: nowISO(),
+    lastActivityAt: nowISO(),
+    contextSummary: '',
+    messageCount: 0,
+    consecutiveFailures: 0,
+    handoffNotified: false,
+    transaction: {
+      mode: '',
+      customer_name: '',
+      items: [],
+      notes: '',
+      address: { street_name: '', street_number: '', neighborhood: '', city: '', state: '', postal_code: '' },
+      payment: '',
+      total_amount: 0,
+      order_id: null,
+    },
+    confirmed: {},
+    pendingFieldConfirmation: null,
+    itemsPhaseComplete: false,
+    awaitingRepeatChoice: false,
+    lastRepeatOfferDate: '',
+    repeatPreview: '',
+    orderStoredForCustomer: false,
+    greeted: false,
+    greetedDate: '',
+    messages: [],
+    catalog: null,
+  });
+
+  let conv = conversations.get(key);
+  const now = Date.now();
+  const inactivityMs = conv ? (now - new Date(conv.lastActivityAt || conv.createdAt || nowISO()).getTime()) : 0;
+  const shouldResetByState = conv
+    && (
+      (conv.state === STATES.WAITING_PAYMENT && inactivityMs > WAITING_PAYMENT_TTL)
+      || (conv.state !== STATES.INIT && inactivityMs > ACTIVE_FLOW_TTL)
+    );
+  if (!conv || inactivityMs > SESSION_TTL || shouldResetByState) {
+    conv = buildConversation();
+    conversations.set(key, conv);
+  }
+  if (!conv.confirmed || typeof conv.confirmed !== 'object') conv.confirmed = {};
+  if (!conv.stateUpdatedAt) conv.stateUpdatedAt = nowISO();
+  if (typeof conv.pendingFieldConfirmation === 'undefined') conv.pendingFieldConfirmation = null;
+  if (typeof conv.itemsPhaseComplete !== 'boolean') conv.itemsPhaseComplete = false;
+  if (typeof conv.awaitingRepeatChoice !== 'boolean') conv.awaitingRepeatChoice = false;
+  if (typeof conv.lastRepeatOfferDate !== 'string') conv.lastRepeatOfferDate = '';
+  if (typeof conv.repeatPreview !== 'string') conv.repeatPreview = '';
+  if (typeof conv.orderStoredForCustomer !== 'boolean') conv.orderStoredForCustomer = false;
+  if (typeof conv.greetedDate !== 'string') conv.greetedDate = '';
+  if (
+    !conv.itemsPhaseComplete
+    && Array.isArray(conv.transaction?.items) && conv.transaction.items.length > 0
+    && (
+      Boolean(cleanText(conv.transaction?.mode))
+      || Boolean(cleanText(conv.transaction?.payment))
+      || [STATES.WAITING_CONFIRMATION, STATES.WAITING_PAYMENT, STATES.CONFIRMED].includes(conv.state)
+    )
+  ) {
+    conv.itemsPhaseComplete = true;
+  }
+  conv.lastActivityAt = nowISO();
+  return conv;
 }
 
 module.exports = {

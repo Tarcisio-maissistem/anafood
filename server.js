@@ -841,19 +841,9 @@ const getTenantFromRequest = (req) => {
     const headerTenant = req.get('x-tenant-id') || req.get('x-tenant');
     const bodyTenant = req.body?.tenant_id || req.body?.tenant;
 
-    const bodyData = req.body?.data;
-    const payload = Array.isArray(bodyData) ? bodyData[0] : (bodyData || req.body || {});
-    const key = payload.key || payload?.messages?.[0]?.key || {};
     const instanceName =
         req.body?.instance ||
         req.body?.instanceName ||
-        req.body?.instance?.instanceName ||
-        req.body?.instance?.name ||
-        payload.instance ||
-        payload?.instance?.instanceName ||
-        payload?.instance?.name ||
-        payload.instanceName ||
-        payload?.messages?.[0]?.instance ||
         null;
 
     const tenant = resolveTenant({
@@ -868,7 +858,7 @@ const getTenantFromRequest = (req) => {
             queryTenant,
             headerTenant,
             bodyTenant,
-            remoteJid: key.remoteJid || payload.remoteJid || null,
+            remoteJid: req.body?.remoteJid || null,
         },
     };
 };
@@ -1073,9 +1063,10 @@ app.get('/api/ana/session', (req, res) => {
  */
 app.post('/api/ana/simulate', async (req, res) => {
     try {
+        console.log('Request Body:', req.body);
         const phoneRaw = String(req.body?.phone || '').trim();
         const text = String(req.body?.text || '').trim();
-        const phone = normalizeCanonicalPhone(phoneRaw);
+        const phone = phoneRaw;
 
         if (!phone || !text) {
             return res.status(400).json({ success: false, error: 'Campos "phone" e "text" sao obrigatorios' });
@@ -1097,11 +1088,20 @@ app.post('/api/ana/simulate', async (req, res) => {
             text,
         });
 
-        const boundApiRequest = (environment, method, apiPath, body = null) =>
-            apiRequest(environment, method, apiPath, body, tenant);
+        const boundApiRequest = async (environment, method, apiPath, body = null) => {
+            // Mock for simulation - don't make real API calls
+            if (method === 'POST' && apiPath.includes('/message/send')) {
+                // Mock send message response
+                return { success: true, id: 'mock-message-id' };
+            }
+            // For other calls, return empty or mock
+            return {};
+        };
         const boundGetEnvConfig = (environment) => getEnvConfig(environment, tenant);
 
-        const result = await handleWhatsAppMessage(phone, text, {
+        let result;
+        try {
+        result = await handleWhatsAppMessage(phone, text, {
             apiRequest: boundApiRequest,
             getEnvConfig: boundGetEnvConfig,
             log,
@@ -1122,6 +1122,10 @@ app.post('/api/ana/simulate', async (req, res) => {
                 });
             },
         });
+        } catch (error) {
+            console.log('Error in handleWhatsAppMessage:', error);
+            handleError(res, error);
+        }
 
         return res.json({
             success: true,
